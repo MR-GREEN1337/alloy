@@ -1,3 +1,8 @@
+"use client";
+
+import { useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { useAuth } from '@/components/global/providers';
 import { AuthVisual } from "@/components/auth/AuthVisual";
 import Logo from "@/components/global/Logo";
 import Link from "next/link";
@@ -7,6 +12,27 @@ export default function AuthLayout({
 }: {
   children: React.ReactNode;
 }) {
+  const { isAuthenticated, isLoading } = useAuth();
+  const router = useRouter();
+
+  useEffect(() => {
+    // Wait for the auth state to be determined
+    if (!isLoading && isAuthenticated) {
+      // If user is authenticated, redirect them to the dashboard
+      router.replace('/dashboard');
+    }
+  }, [isLoading, isAuthenticated, router]);
+
+  // While loading or if authenticated (and about to be redirected), show a loading screen
+  if (isLoading || isAuthenticated) {
+    return (
+      <div className="flex h-screen w-full items-center justify-center bg-background">
+        Loading...
+      </div>
+    );
+  }
+
+  // Only show the auth layout if the user is not authenticated
   return (
     <div className="bg-background text-foreground relative flex min-h-screen w-full font-sans">
       <div className="absolute top-6 left-6 z-10">

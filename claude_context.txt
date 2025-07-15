@@ -2,10 +2,14 @@ File: backend/src/core/security.py
 from datetime import datetime, timedelta, timezone
 from passlib.context import CryptContext
 from jose import JWTError, jwt
+from typing import Dict, Any, Optional
+from sqlmodel import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from src.core.settings import get_settings
+from src.db import models
 
 settings = get_settings()
-
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -14,15 +18,30 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
-def create_access_token(data: dict, expires_delta: timedelta | None = None):
+def create_access_token(data: dict):
     to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.now(timezone.utc) + expires_delta
-    else:
-        expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
-    return encoded_jwt-e 
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+def create_refresh_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+def decode_token(token: str) -> Optional[Dict[str, Any]]:
+    try:
+        return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+    except JWTError:
+        return None
+
+async def get_user_by_email(session: AsyncSession, email: str) -> Optional[models.User]:
+    """Fetches a user by their email address."""
+    statement = select(models.User).where(models.User.email == email)
+    
+    result = await session.execute(statement)
+    return result.scalar_one_or_none()-e 
 -e
 
 File: backend/src/core/settings.py
@@ -38,12 +57,21 @@ class Settings(BaseSettings):
     FAIL_FAST: bool = False
 
     # Security & JWT
-    SECRET_KEY: str  # No default! Must be set in .env
+    SECRET_KEY: str
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
+    # AI APIs
+    QLOO_API_KEY: str
+    GEMINI_API_KEY: str
+    
+    # Google OAuth
+    GOOGLE_CLIENT_ID: str
+    GOOGLE_CLIENT_SECRET: str
 
     # Database
-    POSTGRES_DATABASE_URL: str  # No default!
+    POSTGRES_DATABASE_URL: str
     POSTGRES_SCHEMA: str = "public"
     POSTGRES_POOL_SIZE: int = 10
     POSTGRES_MAX_OVERFLOW: int = 5
@@ -51,7 +79,7 @@ class Settings(BaseSettings):
     POSTGRES_POOL_RECYCLE: int = 1800
     POSTGRES_USE_SSL: bool = False
 
-    # CORS
+    # CORS & Frontend
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
 
 @lru_cache
@@ -69,6 +97,7 @@ import json
 
 from src.db.postgresql import postgres_db
 from src.core.settings import get_settings
+from src.db.models import rebuild_all_models # <-- IMPORT THE FIX
 
 settings = get_settings()
 
@@ -93,17 +122,34 @@ class JsonLogFormatter:
         return json.dumps(log_object) + "\n"
 
 def setup_logging():
+    """
+    Configures logging.
+    Uses a structured JSON format for non-development environments
+    and Loguru's default, human-friendly format for development.
+    """
     logger.remove()
-    log_format = JsonLogFormatter().format if settings.ENVIRONMENT != "development" else None
-    logger.add(sys.stderr, level="INFO", format=log_format)
+    
+    if settings.ENVIRONMENT != "development":
+        # For production, staging, etc., use the JSON formatter
+        log_format = JsonLogFormatter().format
+        logger.add(sys.stderr, level="INFO", format=log_format)
+    else:
+        # For local development, use the default, colorful Loguru format
+        logger.add(sys.stderr, level="INFO")
 
 # --- Lifespan Manager ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # --- SETUP PHASE ---
     setup_logging()
     logger.info(f"Starting up in {settings.ENVIRONMENT} mode...")
     start_time = time.time()
     
+    # --- THIS IS THE FIX ---
+    # Resolve all model relationships before touching the database.
+    rebuild_all_models()
+    # --- END FIX ---
+
     try:
         await postgres_db.create_db_and_tables()
         logger.info("Database connection and tables verified.")
@@ -113,7 +159,11 @@ async def lifespan(app: FastAPI):
             raise RuntimeError("Database connection failed.") from e
 
     logger.info(f"Startup complete in {time.time() - start_time:.2f}s")
+    
+    # --- APPLICATION RUNNING ---
     yield
+    
+    # --- SHUTDOWN PHASE ---
     logger.info("Shutting down...")-e 
 -e
 
@@ -384,203 +434,211 @@ File: backend/src/db/__init__.py
 -e 
 -e
 
-File: backend/src/db/models/user.py
-from __future__ import annotations
-from typing import List, Optional
-from datetime import datetime
-from sqlmodel import Field, SQLModel, Relationship
-from sqlalchemy import Column, DateTime, func
-
-class User(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    full_name: Optional[str] = Field(default=None)
-    email: str = Field(unique=True, index=True)
-    hashed_password: str
-    is_active: bool = Field(default=True)
-    is_superuser: bool = Field(default=False)
-    
-    created_at: datetime = Field(
-        sa_column=Column(DateTime(timezone=True), server_default=func.now()),
-        nullable=False
-    )
-    updated_at: datetime = Field(
-        sa_column=Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
-        nullable=False
-    )
-
-    reports: List["Report"] = Relationship(back_populates="user")-e 
--e
-
-File: backend/src/db/models/analysis.py
+File: backend/src/db/models/__init__.py
 from __future__ import annotations
 import enum
-from typing import Optional
-from sqlmodel import Field, SQLModel, Relationship
-from sqlalchemy import Column, Enum as SAEnum, TEXT
+from typing import List, Optional
+from datetime import datetime
+from sqlmodel import Field, SQLModel, Relationship as SQLModelRelationship
+from sqlalchemy.orm import relationship
+from sqlalchemy import Column, DateTime, Enum as SAEnum, func, TEXT
+from loguru import logger
+
+# --- Enums ---
+class ReportStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
 
 class ClashSeverity(str, enum.Enum):
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
 
-class ReportAnalysis(SQLModel, table=True):
+# --- Database Table Models ---
+
+class User(SQLModel, table=True):
+    __tablename__ = 'user'
     id: Optional[int] = Field(default=None, primary_key=True)
+    full_name: Optional[str] = Field(default=None)
+    email: str = Field(unique=True, index=True)
+    hashed_password: Optional[str] = Field(default=None, nullable=True)
+    is_active: bool = Field(default=True)
+    is_superuser: bool = Field(default=False)
+    created_at: datetime = Field(sa_column=Column(DateTime(timezone=True), server_default=func.now(), nullable=False))
+    updated_at: datetime = Field(sa_column=Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False))
     
-    cultural_compatibility_score: float = Field(index=True)
-    affinity_overlap_score: float
-    
-    brand_archetype_summary: str = Field(sa_column=Column(TEXT))
-    strategic_summary: str = Field(sa_column=Column(TEXT))
-
-    # Foreign Key to Report
-    report_id: int = Field(foreign_key="report.id")
-
-    # Relationship back to Report
-    report: "Report" = Relationship(back_populates="analysis")
-
-class CultureClash(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    
-    topic: str = Field(index=True)
-    description: str = Field(sa_column=Column(TEXT))
-    severity: ClashSeverity = Field(sa_column=Column(SAEnum(ClashSeverity)))
-
-    # Foreign Key to Report
-    report_id: int = Field(foreign_key="report.id")
-
-    # Relationship back to Report
-    report: "Report" = Relationship(back_populates="culture_clashes")
-
-class UntappedGrowth(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-
-    description: str = Field(sa_column=Column(TEXT))
-    potential_impact_score: int # Score from 1-10
-
-    # Foreign Key to Report
-    report_id: int = Field(foreign_key="report.id")
-
-    # Relationship back to Report
-    report: "Report" = Relationship(back_populates="untapped_growths")-e 
--e
-
-File: backend/src/db/models/__init__.py
-from .user import User
-from .report import Report, ReportStatus
-from .analysis import ReportAnalysis, CultureClash, UntappedGrowth, ClashSeverity
-
-__all__ = [
-    "User",
-    "Report",
-    "ReportStatus",
-    "ReportAnalysis",
-    "CultureClash",
-    "UntappedGrowth",
-    "ClashSeverity",
-]
-
-# Verify that all models are properly loaded
-def verify_models():
-    """Verify that all expected models are loaded and registered."""
-    missing_models = [model for model in __all__ if model not in globals()]
-    if missing_models:
-        raise ImportError(
-            f"Failed to import the following models: {', '.join(missing_models)}"
-        )
-
-
-# Run verification when the module is imported
-verify_models()
--e 
--e
-
-File: backend/src/db/models/report.py
-from __future__ import annotations
-import enum
-from typing import List, Optional
-from datetime import datetime
-from sqlmodel import Field, SQLModel, Relationship
-from sqlalchemy import Column, DateTime, Enum as SAEnum, func
-
-class ReportStatus(str, enum.Enum):
-    PENDING = "PENDING"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
+    # DEFINITIVE FIX: Use sa_relationship to pass a pure SQLAlchemy relationship object.
+    reports: List["Report"] = SQLModelRelationship(sa_relationship=relationship("Report", back_populates="user"))
 
 class Report(SQLModel, table=True):
+    __tablename__ = 'report'
     id: Optional[int] = Field(default=None, primary_key=True)
     title: str = Field(index=True)
     acquirer_brand: str
     target_brand: str
-    
-    status: ReportStatus = Field(
-        sa_column=Column(SAEnum(ReportStatus)), 
-        default=ReportStatus.PENDING,
-        nullable=False
-    )
-    
-    created_at: datetime = Field(
-        sa_column=Column(DateTime(timezone=True), server_default=func.now()),
-        nullable=False
-    )
-    updated_at: datetime = Field(
-        sa_column=Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
-        nullable=False
-    )
-
-    # Foreign Key to User
+    status: ReportStatus = Field(sa_column=Column(SAEnum(ReportStatus), nullable=False), default=ReportStatus.PENDING)
+    created_at: datetime = Field(sa_column=Column(DateTime(timezone=True), server_default=func.now(), nullable=False))
+    updated_at: datetime = Field(sa_column=Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False))
     user_id: int = Field(foreign_key="user.id")
 
-    # Relationship back to User
-    user: "User" = Relationship(back_populates="reports")
+    # DEFINITIVE FIX: Use sa_relationship for ALL relationships, specifying `uselist=False` for one-to-one.
+    user: "User" = SQLModelRelationship(sa_relationship=relationship("User", back_populates="reports"))
+    analysis: Optional["ReportAnalysis"] = SQLModelRelationship(sa_relationship=relationship("ReportAnalysis", back_populates="report", uselist=False))
+    culture_clashes: List["CultureClash"] = SQLModelRelationship(sa_relationship=relationship("CultureClash", back_populates="report"))
+    untapped_growths: List["UntappedGrowth"] = SQLModelRelationship(sa_relationship=relationship("UntappedGrowth", back_populates="report"))
 
-    # One-to-one relationship to the analysis summary
-    analysis: Optional["ReportAnalysis"] = Relationship(
-        back_populates="report", 
-        sa_relationship_kwargs={'uselist': False}
-    )
+class ReportAnalysis(SQLModel, table=True):
+    __tablename__ = 'reportanalysis'
+    id: Optional[int] = Field(default=None, primary_key=True)
+    cultural_compatibility_score: float = Field(index=True)
+    affinity_overlap_score: float
+    brand_archetype_summary: str = Field(sa_column=Column(TEXT))
+    strategic_summary: str = Field(sa_column=Column(TEXT))
+    report_id: int = Field(foreign_key="report.id")
+    
+    report: "Report" = SQLModelRelationship(sa_relationship=relationship("Report", back_populates="analysis"))
 
-    # One-to-many relationships
-    culture_clashes: List["CultureClash"] = Relationship(back_populates="report")
-    untapped_growths: List["UntappedGrowth"] = Relationship(back_populates="report")-e 
+class CultureClash(SQLModel, table=True):
+    __tablename__ = 'cultureclash'
+    id: Optional[int] = Field(default=None, primary_key=True)
+    topic: str = Field(index=True)
+    description: str = Field(sa_column=Column(TEXT))
+    severity: ClashSeverity = Field(sa_column=Column(SAEnum(ClashSeverity)))
+    report_id: int = Field(foreign_key="report.id")
+    
+    report: "Report" = SQLModelRelationship(sa_relationship=relationship("Report", back_populates="culture_clashes"))
+
+class UntappedGrowth(SQLModel, table=True):
+    __tablename__ = 'untappedgrowth'
+    id: Optional[int] = Field(default=None, primary_key=True)
+    description: str = Field(sa_column=Column(TEXT))
+    potential_impact_score: int
+    report_id: int = Field(foreign_key="report.id")
+    
+    report: "Report" = SQLModelRelationship(sa_relationship=relationship("Report", back_populates="untapped_growths"))
+
+# --- API Schemas (for request/response validation) ---
+class ReportCreate(SQLModel):
+    title: str
+    acquirer_brand: str
+    target_brand: str
+
+class ReportRead(SQLModel):
+    id: int
+    title: str
+    acquirer_brand: str
+    target_brand: str
+    status: ReportStatus
+    created_at: datetime
+    updated_at: datetime
+    user_id: int
+    analysis: Optional[ReportAnalysis] = None
+    culture_clashes: List[CultureClash] = []
+    untapped_growths: List[UntappedGrowth] = []
+
+# --- Lifespan Helper ---
+def rebuild_all_models():
+    """Forces SQLModel/Pydantic to resolve all string-based forward references."""
+    logger.info("Rebuilding all model forward references...")
+    # Rebuilding is still good practice to ensure Pydantic models with forward refs are ready.
+    ReportRead.model_rebuild()
+    logger.success("Model forward references rebuilt successfully.")
+
+__all__ = [
+    "User", "Report", "ReportAnalysis", "CultureClash", "UntappedGrowth",
+    "ReportStatus", "ClashSeverity",
+    "ReportCreate", "ReportRead",
+    "rebuild_all_models"
+]-e 
 -e
 
 File: backend/src/api/v1/auth.py
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Header
+from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
-from typing import Annotated
-from sqlmodel import select
+from typing import Annotated, Optional, Dict, Any
+from sqlmodel import select, SQLModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from src.core.security import create_access_token, verify_password
+from urllib.parse import urlencode
+import httpx
+from jose import jwt
+from loguru import logger
+
+from src.core.security import (
+    create_access_token,
+    create_refresh_token,
+    verify_password,
+    get_password_hash,
+    decode_token,
+    get_user_by_email
+)
 from src.core.settings import get_settings
 from src.db.postgresql import get_session
-from src.db.models.user import User as UserModel
-from pydantic import BaseModel, EmailStr
-from src.core.security import get_password_hash
-import datetime
+from src.db import models
+from pydantic import BaseModel
 
 settings = get_settings()
-
 router = APIRouter()
 
+# --- Pydantic Models ---
 class Token(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str
+
+class TokenRefreshRequest(BaseModel):
+    refresh_token: str
+    
+class TokenRefreshResponse(BaseModel):
     access_token: str
     token_type: str
 
 class UserCreate(BaseModel):
-    email: EmailStr
+    email: str
     password: str
 
+# --- OAuth2 Provider Constants ---
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
+GOOGLE_SCOPES = "openid email profile"
+
+
+# --- Helper Function ---
+async def create_user_if_not_exists(session: AsyncSession, user_data: Dict[str, Any]) -> models.User:
+    db_user = await get_user_by_email(session, user_data["email"])
+    if db_user:
+        return db_user
+    
+    # CORE FIX: Instantiate the model directly instead of using model_validate.
+    # This allows the database to apply the server_default for created_at and updated_at.
+    new_user = models.User(**user_data)
+    
+    try:
+        session.add(new_user)
+        await session.commit()
+        await session.refresh(new_user)
+        logger.info(f"New user created via SSO: {new_user.email}")
+        return new_user
+    except Exception as e:
+        await session.rollback()
+        logger.error(f"Error during SSO user creation for {user_data['email']}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not create user account."
+        )
+
+
+# --- API Endpoints ---
 DBSession = Annotated[AsyncSession, Depends(get_session)]
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register_user(user_create: UserCreate, session: DBSession):
-    statement = select(UserModel).where(UserModel.email == user_create.email)
-    existing_user = (await session.exec(statement)).first()
-    if existing_user:
+    if await get_user_by_email(session, user_create.email):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Email already registered")
     
-    new_user = UserModel(
+    new_user = models.User(
         email=user_create.email, 
         hashed_password=get_password_hash(user_create.password)
     )
@@ -593,20 +651,121 @@ async def login_for_access_token(
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()], 
     session: DBSession
 ):
-    statement = select(UserModel).where(UserModel.email == form_data.username)
-    user = (await session.exec(statement)).first()
-    if not user or not verify_password(form_data.password, user.hashed_password):
+    user = await get_user_by_email(session, form_data.username)
+    if not user or not user.hashed_password or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,
             "Incorrect email or password",
             {"WWW-Authenticate": "Bearer"},
         )
     
-    access_token_expires = datetime.timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user.email}, expires_delta=access_token_expires
+    token_data = {"sub": user.email}
+    return Token(
+        access_token=create_access_token(data=token_data),
+        refresh_token=create_refresh_token(data=token_data),
+        token_type="bearer"
     )
-    return Token(access_token=access_token, token_type="bearer")-e 
+
+@router.post("/refresh", response_model=TokenRefreshResponse)
+async def refresh_access_token(
+    refresh_request: TokenRefreshRequest,
+    session: DBSession
+):
+    token_data = decode_token(refresh_request.refresh_token)
+    if not token_data or "sub" not in token_data:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid refresh token")
+    
+    user = await get_user_by_email(session, token_data["sub"])
+    if not user:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found")
+
+    return TokenRefreshResponse(
+        access_token=create_access_token(data={"sub": user.email}),
+        token_type="bearer"
+    )
+
+@router.get("/google/authorize", tags=["auth"], response_class=RedirectResponse)
+async def google_authorize(request: Request):
+    redirect_uri = f"{str(request.base_url).rstrip('/')}/api/v1/auth/google/callback"
+    params = {
+        "client_id": settings.GOOGLE_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": GOOGLE_SCOPES,
+        "access_type": "offline",
+        "prompt": "consent",
+    }
+    auth_url = f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
+    return RedirectResponse(auth_url)
+
+
+@router.get("/google/callback", tags=["auth"], response_class=RedirectResponse)
+async def google_callback(
+    request: Request, code: str, session: AsyncSession = Depends(get_session)
+):
+    """Handles the callback from Google, exchanges code for token, and gets user info."""
+    redirect_uri = f"{str(request.base_url).rstrip('/')}/api/v1/auth/google/callback"
+
+    token_data = {
+        "code": code,
+        "client_id": settings.GOOGLE_CLIENT_ID,
+        "client_secret": settings.GOOGLE_CLIENT_SECRET,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    }
+    
+    async with httpx.AsyncClient() as client:
+        token_response = await client.post(GOOGLE_TOKEN_URL, data=token_data)
+        if token_response.status_code != 200:
+            logger.error(f"Google token exchange FAILED. Status: {token_response.status_code}, Response: {token_response.json()}")
+            raise HTTPException(status_code=400, detail="Could not exchange token with Google.")
+        
+        access_token_ext = token_response.json().get("access_token")
+
+        user_info_response = await client.get(
+            GOOGLE_USERINFO_URL, headers={"Authorization": f"Bearer {access_token_ext}"}
+        )
+        if user_info_response.status_code != 200:
+            logger.error(f"Google user info fetch FAILED: {user_info_response.json()}")
+            raise HTTPException(status_code=400, detail="Could not retrieve user info from Google.")
+        
+        user_info = user_info_response.json()
+
+    email = user_info.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="No email returned from Google.")
+
+    user = await create_user_if_not_exists(session, {"email": email, "full_name": user_info.get("name")})
+    
+    access_token = create_access_token(data={"sub": user.email})
+    refresh_token = create_refresh_token(data={"sub": user.email})
+
+    params = urlencode({"access_token": access_token, "refresh_token": refresh_token})
+    frontend_redirect_url = f"{settings.CORS_ORIGINS[0]}/token?{params}"
+    
+    return RedirectResponse(url=frontend_redirect_url)
+
+async def get_current_user(
+    token: Annotated[str, Header(alias="Authorization")],
+    session: DBSession,
+) -> models.User:
+    if not token.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
+    
+    token = token.split(" ")[1]
+    token_data = decode_token(token)
+    if not token_data or "sub" not in token_data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    user = await get_user_by_email(session, email=token_data["sub"])
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    
+    return user-e 
 -e
 
 File: backend/src/api/v1/health.py
@@ -633,15 +792,103 @@ def health_check(app_version: str = "0.1.0"):
 
 File: backend/src/api/v1/__init__.py
 from fastapi import APIRouter
-from . import auth, health
+from . import auth, health, reports # Add reports
 
 router = APIRouter()
 
-router.include_router(auth.router)
-router.include_router(health.router)
+router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
+router.include_router(health.router, prefix="/health", tags=["Health"])
+router.include_router(reports.router, prefix="/reports", tags=["Reports"]) # Add this line
 
-__all__ = ["router"]
--e 
+__all__ = ["router"]-e 
+-e
+
+File: backend/src/api/v1/reports.py
+from fastapi import APIRouter, Depends, HTTPException, status
+from typing import List
+from sqlmodel import select
+from sqlalchemy.ext.asyncio import AsyncSession
+import httpx
+import json
+
+from src.db.postgresql import get_session
+from src.db import models # <-- MODIFIED: Use the models package
+from src.api.v1.auth import get_current_user
+from src.services.report_generator import (
+    get_qloo_taste_data,
+    calculate_affinity_overlap,
+    find_culture_clashes,
+    find_untapped_growth,
+    generate_llm_insights
+)
+
+router = APIRouter()
+
+@router.post("/", response_model=models.ReportRead, status_code=status.HTTP_201_CREATED) # <-- MODIFIED
+async def create_report(
+    report_in: models.ReportCreate, # <-- MODIFIED
+    session: AsyncSession = Depends(get_session),
+    current_user: models.User = Depends(get_current_user) # <-- MODIFIED
+):
+    # 1. Create initial report record in DB
+    report = models.Report.model_validate(report_in, update={"user_id": current_user.id}) # <-- MODIFIED
+    session.add(report)
+    await session.commit()
+    await session.refresh(report)
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        acquirer_data = await get_qloo_taste_data(report.acquirer_brand, client)
+        target_data = await get_qloo_taste_data(report.target_brand, client)
+    
+    if not acquirer_data or not target_data:
+        report.status = "FAILED"
+        session.add(report)
+        await session.commit()
+        raise HTTPException(status_code=404, detail="Could not retrieve taste data for one or both brands.")
+
+    # 2. Perform Analysis
+    affinity_score = calculate_affinity_overlap(acquirer_data, target_data)
+    clashes = find_culture_clashes(acquirer_data, target_data)
+    opportunities = find_untapped_growth(acquirer_data, target_data)
+
+    # 3. Generate LLM Insights
+    acquirer_taste_str = ", ".join([item['name'] for item in acquirer_data[:15]])
+    target_taste_str = ", ".join([item['name'] for item in target_data[:15]])
+    llm_insights = await generate_llm_insights(acquirer_taste_str, target_taste_str)
+
+    # 4. Save analysis results to the database
+    analysis = models.ReportAnalysis( # <-- MODIFIED
+        report_id=report.id,
+        cultural_compatibility_score=affinity_score,
+        affinity_overlap_score=affinity_score, # Can be the same for now
+        brand_archetype_summary=llm_insights['brand_archetype_summary'],
+        strategic_summary=llm_insights['strategic_summary']
+    )
+    session.add(analysis)
+
+    for clash in clashes:
+        session.add(models.CultureClash(report_id=report.id, **clash)) # <-- MODIFIED
+    
+    for opportunity in opportunities:
+        session.add(models.UntappedGrowth(report_id=report.id, **opportunity)) # <-- MODIFIED
+
+    report.status = "COMPLETED"
+    session.add(report)
+    await session.commit()
+    await session.refresh(report)
+
+    return report
+
+
+@router.get("/", response_model=List[models.ReportRead]) # <-- MODIFIED
+async def get_reports(
+    session: AsyncSession = Depends(get_session),
+    current_user: models.User = Depends(get_current_user) # <-- MODIFIED
+):
+    """Fetches all reports for the currently logged-in user."""
+    statement = select(models.Report).where(models.Report.user_id == current_user.id).order_by(models.Report.created_at.desc()) # <-- MODIFIED
+    reports = (await session.execute(statement)).all()
+    return reports-e 
 -e
 
 File: backend/src/api/__init__.py
@@ -677,6 +924,336 @@ app.add_middleware(
 
 # --- API Routers ---
 app.include_router(api_router, prefix="/api/v1", tags=["System"])-e 
+-e
+
+File: backend/src/services/report_generator.py
+import httpx
+import google.generativeai as genai
+from typing import List, Dict, Any
+from loguru import logger
+import json
+
+from src.core.settings import get_settings
+
+settings = get_settings()
+
+# --- Configure APIs ---
+genai.configure(api_key=settings.GEMINI_API_KEY)
+QLOO_BASE_URL = "https://api.qloo.com/v2"
+
+# --- Qloo API Service ---
+async def get_qloo_taste_data(brand_name: str, client: httpx.AsyncClient) -> List[Dict[str, Any]]:
+    """Fetches the top 50 taste affinities for a given brand from Qloo."""
+    headers = {"x-api-key": settings.QLOO_API_KEY}
+    # First, find the entity ID for the brand name
+    search_params = {"q": brand_name, "type": "brand", "limit": 1}
+    try:
+        search_response = await client.get(f"{QLOO_BASE_URL}/search", params=search_params, headers=headers)
+        search_response.raise_for_status()
+        search_results = search_response.json()
+        if not search_results or not search_results.get('data'):
+            logger.warning(f"Qloo: No entity found for brand '{brand_name}'")
+            return []
+        
+        brand_id = search_results['data'][0]['id']
+        logger.info(f"Qloo: Found entity ID '{brand_id}' for brand '{brand_name}'")
+
+        # Now, get the audience affinities for that brand ID
+        taste_params = {"id": [brand_id]}
+        taste_response = await client.get(f"{QLOO_BASE_URL}/taste-affinities/audiences", params=taste_params, headers=headers)
+        taste_response.raise_for_status()
+        
+        return taste_response.json().get('data', [])
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Qloo API error for '{brand_name}': {e.response.status_code} - {e.response.text}")
+        return []
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while fetching Qloo data for '{brand_name}': {e}")
+        return []
+
+# --- Analysis Service ---
+def calculate_affinity_overlap(acquirer_data: List[Dict], target_data: List[Dict]) -> float:
+    """Calculates a Jaccard similarity score for affinity overlap."""
+    if not acquirer_data or not target_data:
+        return 0.0
+    
+    acquirer_interests = {item['name'] for item in acquirer_data}
+    target_interests = {item['name'] for item in target_data}
+
+    intersection = len(acquirer_interests.intersection(target_interests))
+    union = len(acquirer_interests.union(target_interests))
+    
+    return round((intersection / union) * 100, 2) if union > 0 else 0.0
+
+def find_culture_clashes(acquirer_data: List[Dict], target_data: List[Dict]) -> List[Dict[str, Any]]:
+    """Identifies potential culture clashes based on divergent tastes."""
+    acquirer_interests = {item['name'] for item in acquirer_data}
+    target_interests = {item['name'] for item in target_data}
+
+    clashes = []
+    # Find what's unique to the acquirer's audience
+    for item in acquirer_data:
+        if item['name'] not in target_interests:
+            clashes.append({"topic": item['name'], "description": f"Highly popular with Acquirer's audience but not with Target's.", "severity": "MEDIUM"})
+
+    # Find what's unique to the target's audience
+    for item in target_data:
+        if item['name'] not in acquirer_interests:
+             clashes.append({"topic": item['name'], "description": f"Highly popular with Target's audience but not with Acquirer's.", "severity": "MEDIUM"})
+
+    return clashes[:10] # Limit to top 10 for brevity
+
+def find_untapped_growth(acquirer_data: List[Dict], target_data: List[Dict]) -> List[Dict[str, Any]]:
+    """Identifies untapped growth opportunities."""
+    shared_interests = {item['name'] for item in acquirer_data}.intersection({item['name'] for item in target_data})
+    
+    opportunities = []
+    for interest in list(shared_interests)[:5]: # Look at top 5 shared interests
+        opportunities.append({
+            "description": f"Both audiences show a strong affinity for '{interest}'. This shared passion point could be a key pillar for joint marketing campaigns and product integrations post-acquisition.",
+            "potential_impact_score": 8 # Example score
+        })
+    return opportunities
+
+# --- Gemini (LLM) Service ---
+async def generate_llm_insights(acquirer_tastes: str, target_tastes: str) -> Dict[str, str]:
+    """Generates brand and strategic summaries using Gemini, based on Qloo data."""
+    model = genai.GenerativeModel('gemini-pro')
+    prompt = f"""
+    Act as an expert brand strategist specializing in Mergers & Acquisitions.
+    Your task is to analyze the raw cultural taste data for two brands: an Acquirer and a Target.
+    Based *only* on the provided data, generate two distinct summaries. Do not use any outside knowledge.
+
+    **CONTEXT - RAW TASTE DATA:**
+
+    *   **Acquirer Audience Top Affinities:** {acquirer_tastes}
+    *   **Target Audience Top Affinities:** {target_tastes}
+
+    **YOUR TASKS:**
+
+    1.  **Brand Archetype Summary (as JSON string):** 
+        Deduce the personality and "archetype" of each brand's audience. Describe who they are, what they value, and their overall cultural posture. Format this as a JSON string with two keys: "acquirer_archetype" and "target_archetype".
+
+    2.  **Strategic Summary (as a single string):** 
+        Write a high-level executive summary that synthesizes the findings. Explain the cultural compatibility, highlight the primary risks based on taste clashes, and identify the most significant strategic opportunities revealed by the data overlap.
+
+    **OUTPUT FORMAT:**
+    Return a single, valid JSON object with two top-level keys: "brand_archetype_summary" and "strategic_summary". The value for "brand_archetype_summary" must be a stringified JSON.
+    """
+    
+    try:
+        response = await model.generate_content_async(prompt)
+        # Clean up the response to ensure it's valid JSON
+        cleaned_response = response.text.strip().replace('```json', '').replace('```', '')
+        return json.loads(cleaned_response)
+    except Exception as e:
+        logger.error(f"Gemini generation failed: {e}")
+        return {
+            "brand_archetype_summary": '{"acquirer_archetype": "Error generating analysis.", "target_archetype": "Error generating analysis."}',
+            "strategic_summary": "Could not generate AI-powered strategic summary due to an API error."
+        }-e 
+-e
+
+File: web/src/app/(pages)/(authed)/dashboard/page.tsx
+"use client";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { useAuth } from "@/components/global/providers";
+import useSWR from 'swr';
+import useSWRMutation from 'swr/mutation';
+import { useState } from "react";
+
+// --- SWR Fetcher and Mutator ---
+const fetcher = (url: string, token: string) => 
+  fetch(url, { headers: { 'Authorization': `Bearer ${token}` } }).then(res => res.json());
+
+async function createReport(url: string, { arg }: { arg: { acquirer_brand: string, target_brand: string, token: string } }) {
+  const { token, ...body } = arg;
+  return fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify(body)
+  }).then(res => {
+    if (!res.ok) throw new Error('Failed to create report.');
+    return res.json();
+  });
+}
+
+
+export default function DashboardPage() {
+    const { accessToken } = useAuth();
+    const { data: reports, error, mutate } = useSWR(
+        accessToken ? [`${process.env.NEXT_PUBLIC_API_URL}/reports/`, accessToken] : null,
+        ([url, token]) => fetcher(url, token)
+    );
+    
+    const { trigger, isMutating } = useSWRMutation(
+        `${process.env.NEXT_PUBLIC_API_URL}/reports/`,
+        createReport
+    );
+
+    const [acquirer, setAcquirer] = useState("");
+    const [target, setTarget] = useState("");
+
+    const handleGenerateReport = async () => {
+        try {
+            await trigger({
+                acquirer_brand: acquirer,
+                target_brand: target,
+                title: `${acquirer} vs. ${target}`,
+                token: accessToken!
+            });
+            mutate(); // Re-fetch the list of reports after creating a new one
+            setAcquirer("");
+            setTarget("");
+        } catch (error) {
+            console.error(error);
+            // You can use a toast library to show an error message here
+        }
+    };
+    
+    return (
+        <div className="space-y-6">
+            <Card>
+                <CardHeader>
+                    <CardTitle>Create New Alloy Report</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                            <Label htmlFor="acquirer">Acquirer Brand</Label>
+                            <Input id="acquirer" placeholder="e.g., Disney" value={acquirer} onChange={e => setAcquirer(e.target.value)} />
+                        </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="target">Target Brand</Label>
+                            <Input id="target" placeholder="e.g., A24 Films" value={target} onChange={e => setTarget(e.target.value)} />
+                        </div>
+                    </div>
+                    <Button onClick={handleGenerateReport} disabled={isMutating || !acquirer || !target}>
+                        {isMutating ? 'Analyzing Taste DNA...' : 'Generate Report'}
+                    </Button>
+                </CardContent>
+            </Card>
+
+            <Card>
+                <CardHeader>
+                    <CardTitle>Recent Reports</CardTitle>
+                </CardHeader>
+                <CardContent>
+                    {error && <div>Failed to load reports.</div>}
+                    {!reports && !error && <div>Loading reports...</div>}
+                    {reports && (
+                        <ul className="space-y-2">
+                           {reports.map((report: any) => (
+                               <li key={report.id} className="p-2 border rounded-md">
+                                   <p className="font-medium">{report.title}</p>
+                                   <p className="text-sm text-muted-foreground">Status: {report.status}</p>
+                                   <p className="text-sm text-muted-foreground">Compatibility Score: {report.analysis?.cultural_compatibility_score || 'N/A'}</p>
+                               </li>
+                           ))}
+                        </ul>
+                    )}
+                </CardContent>
+            </Card>
+        </div>
+    );
+}-e 
+-e
+
+File: web/src/app/(pages)/(authed)/layout.tsx
+"use client";
+
+import { useRouter } from "next/navigation";
+import { useEffect } from "react";
+import { useAuth } from "@/components/global/providers";
+import { Sidebar } from "@/components/global/Sidebar";
+import { ThemeProvider as NextThemesProvider } from "next-themes";
+import { Header } from "@/components/global/Header";
+
+export default function AuthedLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  const { isAuthenticated, isLoading } = useAuth();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (!isLoading && !isAuthenticated) {
+      router.replace('/login');
+    }
+  }, [isLoading, isAuthenticated, router]);
+
+  if (isLoading || !isAuthenticated) {
+    return (
+      <div className="flex h-screen w-full items-center justify-center bg-background">
+        Loading...
+      </div>
+    );
+  }
+
+  return (
+    <NextThemesProvider
+        attribute="class"
+        defaultTheme="system"
+        enableSystem
+        disableTransitionOnChange
+    >
+        <div className="flex min-h-screen w-full flex-col bg-muted/40">
+            < Sidebar />
+            <div className="flex flex-col sm:gap-4 sm:py-4 sm:pl-14">
+                  <Header />
+                    <main className="grid flex-1 items-start gap-4 p-4 sm:px-6 sm:py-0 md:gap-8">
+                    {children}
+                </main>
+            </div>
+        </div>
+    </NextThemesProvider>
+  );
+}-e 
+-e
+
+File: web/src/app/(pages)/(auth)/token/page.tsx
+"use client";
+
+import { useSearchParams, useRouter } from 'next/navigation';
+import { useEffect } from 'react';
+import { useAuth } from '@/components/global/providers';
+
+export default function TokenPage() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const { login } = useAuth();
+
+  useEffect(() => {
+    const accessToken = searchParams.get('access_token');
+    const refreshToken = searchParams.get('refresh_token');
+
+    if (accessToken && refreshToken) {
+      login(accessToken, refreshToken);
+      // Clean the URL and redirect to the dashboard
+      router.replace('/dashboard');
+    } else {
+      // Handle error case, maybe redirect to login with an error message
+      router.replace('/login?error=auth_failed');
+    }
+  }, [searchParams, router, login]);
+
+  return (
+    <div className="flex h-screen w-full items-center justify-center bg-background">
+      <div className="text-center">
+        <p className="text-lg text-foreground">Finalizing authentication...</p>
+        <p className="text-sm text-muted-foreground">Please wait, you will be redirected shortly.</p>
+      </div>
+    </div>
+  );
+}-e 
 -e
 
 File: web/src/app/(pages)/(auth)/register/page.tsx
@@ -862,23 +1439,54 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { signIn } from "next-auth/react";
 import Link from "next/link";
 import { useState } from "react";
 import { FaGoogle } from "react-icons/fa";
+import { useAuth } from '@/components/global/providers';
+import { useRouter, useSearchParams } from 'next/navigation';
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const { login } = useAuth();
+  const router = useRouter();
+  const searchParams = useSearchParams();
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    await signIn("credentials", {
-      email,
-      password,
-      callbackUrl: "/dashboard", // Redirect to dashboard on success
-    });
+    setError(null);
+
+    const formData = new URLSearchParams();
+    formData.append('username', email);
+    formData.append('password', password);
+
+    try {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: formData.toString(),
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json();
+        setError(errorData.detail || "Login failed. Please check your credentials.");
+        return;
+      }
+      
+      const tokens = await res.json();
+      login(tokens.access_token, tokens.refresh_token);
+      router.push("/dashboard");
+
+    } catch (err) {
+      setError("An unexpected error occurred. Please try again.");
+    }
   };
+
+  // Google login is now a simple link to our backend
+  const googleAuthUrl = `${process.env.NEXT_PUBLIC_API_URL}/auth/google/authorize`;
 
   return (
     <Card className="w-full max-w-sm">
@@ -889,6 +1497,8 @@ export default function LoginPage() {
         </CardDescription>
       </CardHeader>
       <CardContent>
+        {error && <p className="mb-4 text-center text-sm text-destructive">{error}</p>}
+        {searchParams.get('error') && <p className="mb-4 text-center text-sm text-destructive">Authentication failed. Please try again.</p>}
         <form onSubmit={handleLogin} className="space-y-4">
           <div className="space-y-2">
             <Label htmlFor="email">Email</Label>
@@ -921,9 +1531,11 @@ export default function LoginPage() {
           <div className="flex-grow border-t border-muted" />
         </div>
         <div className="space-y-2">
-          <Button variant="outline" className="w-full" onClick={() => signIn('google')}>
-            <FaGoogle /> Log in with Google
-          </Button>
+            <Button variant="outline" className="w-full" asChild>
+                <a href={googleAuthUrl}>
+                    <FaGoogle className="mr-2"/> Log in with Google
+                </a>
+            </Button>
         </div>
       </CardContent>
       <CardFooter className="flex justify-center text-sm">
@@ -943,7 +1555,7 @@ File: web/src/app/layout.tsx
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import { NextAuthProvider } from "@/components/global/providers";
+import { AppProviders } from "@/components/global/providers";
 import Footer from "@/components/global/Footer";
 
 const geistSans = Geist({
@@ -985,7 +1597,7 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-black`}
       >
-        <NextAuthProvider>{children}</NextAuthProvider>
+        <AppProviders>{children}</AppProviders>
         <Footer
           leftLinks={footerLeftLinks}
           rightLinks={footerRightLinks}
@@ -997,68 +1609,6 @@ export default function RootLayout({
     </html>
   );
 }-e 
--e
-
-File: web/src/app/api/auth/[...nextauth]/route.ts
-import NextAuth from "next-auth";
-import CredentialsProvider from "next-auth/providers/credentials";
-import GoogleProvider from "next-auth/providers/google";
-
-// This is where we define how NextAuth communicates with our FastAPI backend.
-const handler = NextAuth({
-  providers: [
-    GoogleProvider({
-      clientId: process.env.GOOGLE_CLIENT_ID!,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
-    }),
-    CredentialsProvider({
-      name: "Credentials",
-      credentials: {
-        email: { label: "Email", type: "email" },
-        password: { label: "Password", type: "password" },
-      },
-      async authorize(credentials) {
-        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/login`, {
-          method: 'POST',
-          body: JSON.stringify(credentials),
-          headers: { 'Content-Type': 'application/json' }
-        });
-        const user = await res.json();
-
-        if (res.ok && user) {
-          // Return the user object which will include tokens
-          return user;
-        }
-        return null;
-      },
-    }),
-  ],
-  callbacks: {
-    async jwt({ token, user, account }) {
-      // On sign-in, persist the tokens from our backend to the NextAuth token
-      if (account && user) {
-        return {
-          ...token,
-          accessToken: user.access_token,
-          refreshToken: user.refresh_token,
-        };
-      }
-      // TODO: Add refresh token rotation logic here
-      return token;
-    },
-    async session({ session, token }) {
-      // Expose the tokens to the client-side session
-      session.accessToken = token.accessToken;
-      session.error = token.error;
-      return session;
-    },
-  },
-  pages: {
-    signIn: '/auth/login',
-  }
-});
-
-export { handler as GET, handler as POST };-e 
 -e
 
 File: web/src/app/page.tsx
@@ -6558,6 +7108,7 @@ File: web/src/components/global/Hero.tsx
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Link from 'next/link';
+import Logo from './Logo';
 
 // Helper component for glowing feature tags
 interface FeatureItemProps {
@@ -6818,20 +7369,7 @@ export const AlloyHeroSection: React.FC = () => {
           transition={{ duration: 0.5 }}
           className="px-4 backdrop-blur-3xl bg-black/50 rounded-full py-3 flex justify-between items-center"
         >
-          <div className="flex items-center">
-            <div className="text-2xl font-bold flex items-center gap-2">
-              <svg width="24" height="24" viewBox="0 0 40 40" fill="none" className="transform scale-75">
-                <path d="M20 5L5 20L20 35L35 20L20 5Z" stroke="white" strokeWidth="2" />
-              </svg>
-              Alloy
-            </div>
-            <div className="hidden md:flex items-center space-x-2 ml-8">
-              <button className="px-4 py-2 text-sm text-gray-300 hover:text-white hover:bg-white/5 rounded-full transition-colors">Features</button>
-              <button className="px-4 py-2 text-sm text-gray-300 hover:text-white hover:bg-white/5 rounded-full transition-colors">Pricing</button>
-              <button className="px-4 py-2 text-sm text-gray-300 hover:text-white hover:bg-white/5 rounded-full transition-colors">Case Studies</button>
-              <button className="px-4 py-2 text-sm text-gray-300 hover:text-white hover:bg-white/5 rounded-full transition-colors">Contact</button>
-            </div>
-          </div>
+          <Logo />
           <div className="flex items-center space-x-4">
             <Link href="/login">
               <button className="hidden md:block px-4 py-2 text-sm text-gray-300 hover:text-white transition-colors">Log In</button>
@@ -6960,6 +7498,130 @@ export const AlloyHeroSection: React.FC = () => {
         </div>
       </motion.div>
     </div>
+  );
+};-e 
+-e
+
+File: web/src/components/global/CommandPalette.tsx
+"use client";
+
+import React, { useCallback } from 'react';
+import { useRouter } from 'next/navigation';
+import {
+  CommandDialog,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import { FileText, Home, Settings, Users } from 'lucide-react';
+
+interface CommandPaletteProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}
+
+const navItems = [
+  { href: "/dashboard", icon: Home, label: "Dashboard" },
+  { href: "/dashboard/reports", icon: FileText, label: "My Reports" },
+  { href: "/dashboard/team", icon: Users, label: "Team Members" },
+  { href: "/dashboard/settings", icon: Settings, label: "Settings" },
+];
+
+export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
+  const router = useRouter();
+
+  const runCommand = useCallback((command: () => unknown) => {
+    onOpenChange(false);
+    command();
+  }, [onOpenChange]);
+
+  return (
+    <CommandDialog open={open} onOpenChange={onOpenChange}>
+      <CommandInput placeholder="Type a command or search..." />
+      <CommandList>
+        <CommandEmpty>No results found.</CommandEmpty>
+        <CommandGroup heading="Navigation">
+          {navItems.map((item) => (
+            <CommandItem
+              key={item.href}
+              onSelect={() => runCommand(() => router.push(item.href))}
+            >
+              <item.icon className="mr-2 h-4 w-4" />
+              <span>{item.label}</span>
+            </CommandItem>
+          ))}
+        </CommandGroup>
+      </CommandList>
+    </CommandDialog>
+  );
+}   -e 
+-e
+
+File: web/src/components/global/Breadcrumbs.tsx
+"use client";
+
+import React from 'react';
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
+import { ChevronRightIcon, HomeIcon } from 'lucide-react';
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from '@/components/ui/breadcrumb';
+
+export const DynamicBreadcrumb = () => {
+  const pathname = usePathname();
+  const pathSegments = pathname.split('/').filter(segment => segment);
+
+  // Capitalize first letter of a string
+  const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+  return (
+    <Breadcrumb>
+      <BreadcrumbList>
+        <BreadcrumbItem>
+          <BreadcrumbLink asChild>
+            <Link href="/dashboard" className="flex items-center gap-1">
+              <HomeIcon className="h-4 w-4" />
+              <span className="sr-only">Home</span>
+            </Link>
+          </BreadcrumbLink>
+        </BreadcrumbItem>
+        {pathSegments.map((segment, index) => {
+          const href = `/${pathSegments.slice(0, index + 1).join('/')}`;
+          const isLast = index === pathSegments.length - 1;
+          const decodedSegment = capitalize(decodeURIComponent(segment));
+
+          // Don't show "Dashboard" as it's represented by the Home icon
+          if (decodedSegment.toLowerCase() === 'dashboard') {
+            return null;
+          }
+
+          return (
+            <React.Fragment key={href}>
+              <BreadcrumbSeparator>
+                <ChevronRightIcon />
+              </BreadcrumbSeparator>
+              <BreadcrumbItem>
+                {isLast ? (
+                  <BreadcrumbPage>{decodedSegment}</BreadcrumbPage>
+                ) : (
+                  <BreadcrumbLink asChild>
+                    <Link href={href}>{decodedSegment}</Link>
+                  </BreadcrumbLink>
+                )}
+              </BreadcrumbItem>
+            </React.Fragment>
+          );
+        })}
+      </BreadcrumbList>
+    </Breadcrumb>
   );
 };-e 
 -e
@@ -7158,35 +7820,19 @@ import { Playfair_Display } from "next/font/google";
 import { cn } from "@/lib/utils";
 import { usePathname } from "next/navigation";
 
-// Initialize the Playfair Display font for an elegant, premium wordmark.
 const playfair = Playfair_Display({
   subsets: ["latin"],
-  weight: "700", // A bold weight provides presence and authority.
+  weight: "700",
 });
 
 interface LogoProps {
-  /**
-   * Additional CSS classes to apply to the main link element.
-   * Use this to control color, etc. e.g., 'text-white' or 'text-foreground'.
-   */
   className?: string;
-
-  /**
-   * Whether to hide the text part of the logo.
-   * @default false
-   */
   hideText?: boolean;
 }
 
-/**
- * The Alloy Logo Component.
- *
- * Renders the complete Alloy logotype: a custom SVG icon that fuses the letter 'A'
- * with a diamond shape, followed by the "Alloy" wordmark in an elegant serif font.
- * The entire component is theme-aware and interactive.
- */
 export const Logo: React.FC<LogoProps> = ({ className, hideText = false }) => {
   const pathname = usePathname();
+
   return (
     <Link
       href={pathname.startsWith("/dashboard") ? "/dashboard" : "/"}
@@ -7196,7 +7842,6 @@ export const Logo: React.FC<LogoProps> = ({ className, hideText = false }) => {
       )}
       aria-label="Alloy Homepage"
     >
-      {/* The Custom Alloy SVG Icon */}
       <div className="h-7 w-7">
         <svg
           viewBox="0 0 40 40"
@@ -7205,36 +7850,10 @@ export const Logo: React.FC<LogoProps> = ({ className, hideText = false }) => {
           aria-hidden="true"
           className="h-full w-full transition-transform duration-300 ease-in-out group-hover:rotate-[-5deg] group-hover:scale-105"
         >
-          {/* Outer Diamond */}
-          <path
-            d="M20 4L36 20L20 36L4 20Z"
-            stroke="currentColor"
-            strokeWidth="3"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-          {/* Inner 'A' shape / Gem Facet */}
-          <path
-            d="M20 12V28M12 20H28"
-            stroke="currentColor"
-            strokeWidth="3"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
+          <path d="M20 4L36 20L20 36L4 20Z" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M20 12V28M12 20H28" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </div>
-
-      {/* The "Alloy" Wordmark */}
-      {!hideText && (
-        <span
-          className={cn(
-            playfair.className, // Apply the elegant Playfair Display font
-            "text-2xl",         // Set a default size for the text
-          )}
-        >
-          Alloy
-        </span>
-      )}
     </Link>
   );
 };
@@ -7242,18 +7861,390 @@ export const Logo: React.FC<LogoProps> = ({ className, hideText = false }) => {
 export default Logo;-e 
 -e
 
+File: web/src/components/global/Header.tsx
+"use client";
+
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import React, { useState, useEffect, useCallback } from "react";
+import { useTheme } from "next-themes";
+import { toast } from "sonner";
+import {
+  Home,
+  Users,
+  Settings,
+  FileText,
+  Search,
+  PanelLeft,
+  ChevronsUpDown,
+  PlusCircle,
+  LogOut,
+  User as UserIcon,
+  Moon,
+  Sun,
+  Laptop
+} from "lucide-react";
+
+import { DynamicBreadcrumb } from "./Breadcrumbs";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Logo } from "@/components/global/Logo";
+import { useAuth } from "./providers";
+import { CommandPalette } from "./CommandPalette";
+
+const mobileNavItems = [
+  { href: "/dashboard", icon: Home, label: "Dashboard" },
+  { href: "/dashboard/reports", icon: FileText, label: "Reports" },
+  { href: "/dashboard/team", icon: Users, label: "Team" },
+  { href: "/dashboard/settings", icon: Settings, label: "Settings" },
+];
+
+export function Header() {
+  const { logout } = useAuth();
+  const { setTheme } = useTheme();
+  const [isCommandOpen, setCommandOpen] = useState(false);
+
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        setCommandOpen((open) => !open);
+      }
+    };
+    document.addEventListener("keydown", down);
+    return () => document.removeEventListener("keydown", down);
+  }, []);
+  
+  const getInitials = (name?: string | null) => name ? name.split(" ").map((n) => n[0]).join("").toUpperCase() : "U";
+
+  return (
+    <>
+      <header className="sticky top-0 z-30 flex h-14 items-center gap-4 border-b bg-background px-4 sm:static sm:h-auto sm:border-0 sm:bg-transparent sm:px-6">
+        {/* --- Mobile Nav --- */}
+        <Sheet>
+          <SheetTrigger asChild>
+            <Button size="icon" variant="outline" className="sm:hidden">
+              <PanelLeft className="h-5 w-5" />
+              <span className="sr-only">Toggle Menu</span>
+            </Button>
+          </SheetTrigger>
+          <SheetContent side="left" className="sm:max-w-xs">
+            <nav className="grid gap-6 text-lg font-medium">
+              <Logo />
+              {mobileNavItems.map((item) => (
+                <Link key={item.href} href={item.href} className="flex items-center gap-4 px-2.5 text-muted-foreground hover:text-foreground">
+                  <item.icon className="h-5 w-5" />
+                  {item.label}
+                </Link>
+              ))}
+            </nav>
+          </SheetContent>
+        </Sheet>
+
+        {/* --- Desktop Breadcrumbs --- */}
+        <div className="hidden md:block">
+           <DynamicBreadcrumb />
+        </div>
+
+        {/* --- Header Actions (Right Side) --- */}
+        <div className="relative ml-auto flex items-center gap-2 md:grow-0">
+          <Button
+            variant="outline"
+            className="w-full justify-start text-sm text-muted-foreground sm:w-auto sm:pr-12 md:w-40 lg:w-64"
+            onClick={() => setCommandOpen(true)}
+          >
+            <Search className="absolute left-2.5 top-2.5 h-4 w-4" />
+            <span className="ml-6 hidden lg:inline-block">Search...</span>
+             <kbd className="pointer-events-none absolute right-2.5 top-[calc(50%-7px)] hidden h-5 select-none items-center gap-1 rounded border bg-muted px-1.5 font-mono text-[10px] font-medium opacity-100 sm:flex">
+              <span className="text-xs">⌘</span>K
+            </kbd>
+          </Button>
+
+          {/* Placeholder for B2B Org Switcher */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+                <Button variant="outline" className="w-[180px] hidden md:flex">
+                    <span className="truncate">Your Organization</span>
+                    <ChevronsUpDown className="ml-auto h-4 w-4 shrink-0 opacity-50" />
+                </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent className="w-56" align="end">
+                <DropdownMenuLabel>Switch Organization</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem>Org 1</DropdownMenuItem>
+                <DropdownMenuItem>Org 2</DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={() => toast.info("Create Organization clicked!")}>
+                    <PlusCircle className="mr-2 h-4 w-4" /> Create New
+                </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" className="relative h-8 w-8 rounded-full">
+                <Avatar className="h-8 w-8">
+                  <AvatarImage src="" alt="User" />
+                  <AvatarFallback>U</AvatarFallback>
+                </Avatar>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent className="w-56" align="end">
+              <DropdownMenuLabel>My Account</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem asChild>
+                <Link href="/dashboard/settings"><Settings className="mr-2 h-4 w-4" />Settings</Link>
+              </DropdownMenuItem>
+              <DropdownMenuItem>
+                <Sun className="mr-2 h-4 w-4" />
+                <span onClick={() => setTheme('light')}>Light Mode</span>
+              </DropdownMenuItem>
+              <DropdownMenuItem>
+                <Moon className="mr-2 h-4 w-4" />
+                <span onClick={() => setTheme('dark')}>Dark Mode</span>
+              </DropdownMenuItem>
+               <DropdownMenuItem>
+                <Laptop className="mr-2 h-4 w-4" />
+                <span onClick={() => setTheme('system')}>System</span>
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => logout()}>
+                <LogOut className="mr-2 h-4 w-4" />
+                Logout
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </header>
+      <CommandPalette open={isCommandOpen} onOpenChange={setCommandOpen} />
+    </>
+  );
+}-e 
+-e
+
+File: web/src/components/global/Sidebar.tsx
+"use client";
+
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { useTheme } from "next-themes";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import {
+  Home,
+  Users,
+  Settings,
+  FileText,
+  Moon,
+  Sun,
+  Laptop,
+  LifeBuoy,
+  CreditCard
+} from "lucide-react";
+import { cn } from "@/lib/utils";
+import { Logo } from "@/components/global/Logo";
+import { Button } from "../ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
+
+// Define the navigation items for the sidebar
+const mainNavItems = [
+  { href: "/dashboard", icon: Home, label: "Dashboard" },
+  { href: "/dashboard/reports", icon: FileText, label: "My Reports" },
+  { href: "/dashboard/team", icon: Users, label: "Team Members" },
+  { href: "/dashboard/billing", icon: CreditCard, label: "Billing" },
+];
+
+const settingsNavItems = [
+    { href: "/dashboard/settings", icon: Settings, label: "Settings" },
+    { href: "/dashboard/support", icon: LifeBuoy, label: "Support" },
+]
+
+export function Sidebar() {
+  const pathname = usePathname();
+  const { setTheme } = useTheme();
+
+  return (
+    <aside className="fixed inset-y-0 left-0 z-10 hidden w-14 flex-col border-r bg-background sm:flex">
+      {/* Top section with logo and main navigation */}
+      <nav className="flex flex-col items-center gap-4 px-2 sm:py-5">
+        <Logo className="h-7 w-7" />
+        <TooltipProvider>
+          {mainNavItems.map((item) => {
+            const isActive = pathname.startsWith(item.href) && (item.href !== "/dashboard" || pathname === "/dashboard");
+            return (
+              <Tooltip key={item.href}>
+                <TooltipTrigger asChild>
+                  <Link
+                    href={item.href}
+                    className={cn(
+                      "flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:text-foreground md:h-8 md:w-8",
+                      isActive && "bg-accent text-accent-foreground"
+                    )}
+                  >
+                    <item.icon className="h-5 w-5" />
+                    <span className="sr-only">{item.label}</span>
+                  </Link>
+                </TooltipTrigger>
+                <TooltipContent side="right">{item.label}</TooltipContent>
+              </Tooltip>
+            );
+          })}
+        </TooltipProvider>
+      </nav>
+
+      {/* Bottom section with settings and theme switcher */}
+      <nav className="mt-auto flex flex-col items-center gap-4 px-2 sm:py-5">
+        <TooltipProvider>
+          {/* Theme Switcher */}
+          <DropdownMenu>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-9 w-9 text-muted-foreground transition-colors hover:text-foreground md:h-8 md:w-8"
+                  >
+                    <Sun className="h-5 w-5 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
+                    <Moon className="absolute h-5 w-5 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
+                    <span className="sr-only">Toggle theme</span>
+                  </Button>
+                </DropdownMenuTrigger>
+              </TooltipTrigger>
+              <TooltipContent side="right">Toggle Theme</TooltipContent>
+            </Tooltip>
+            <DropdownMenuContent side="right">
+              <DropdownMenuItem onClick={() => setTheme("light")}>
+                <Sun className="mr-2 h-4 w-4" /> Light
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => setTheme("dark")}>
+                <Moon className="mr-2 h-4 w-4" /> Dark
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => setTheme("system")}>
+                <Laptop className="mr-2 h-4 w-4" /> System
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          {/* Settings Link */}
+          {settingsNavItems.map((item) => {
+            const isActive = pathname.startsWith(item.href);
+            return (
+              <Tooltip key={item.href}>
+                <TooltipTrigger asChild>
+                  <Link
+                    href={item.href}
+                    className={cn(
+                      "flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:text-foreground md:h-8 md:w-8",
+                      isActive && "bg-accent text-accent-foreground"
+                    )}
+                  >
+                    <item.icon className="h-5 w-5" />
+                    <span className="sr-only">{item.label}</span>
+                  </Link>
+                </TooltipTrigger>
+                <TooltipContent side="right">{item.label}</TooltipContent>
+              </Tooltip>
+            );
+          })}
+        </TooltipProvider>
+      </nav>
+    </aside>
+  );
+}-e 
+-e
+
 File: web/src/components/global/providers.tsx
 "use client";
 
-import { SessionProvider } from "next-auth/react";
+import React, { createContext, useContext, useState, useEffect } from 'react';
+import Cookies from 'js-cookie';
 
-type Props = {
-  children?: React.ReactNode;
+interface AuthContextType {
+  accessToken: string | null;
+  login: (token: string, refreshToken: string) => void;
+  logout: () => void;
+  isAuthenticated: boolean;
+  isLoading: boolean;
+}
+
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
+  const [accessToken, setAccessToken] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    // On initial load, try to get the token from cookies
+    const token = Cookies.get('alloy_access_token');
+    if (token) {
+      setAccessToken(token);
+    }
+    setIsLoading(false);
+  }, []);
+
+  const login = (token: string, refreshToken: string) => {
+    setAccessToken(token);
+    Cookies.set('alloy_access_token', token, { expires: 1/48, secure: process.env.NODE_ENV === 'production' }); // Expires in 30 mins
+    Cookies.set('alloy_refresh_token', refreshToken, { expires: 7, secure: process.env.NODE_ENV === 'production' });
+  };
+
+  const logout = () => {
+    setAccessToken(null);
+    Cookies.remove('alloy_access_token');
+    Cookies.remove('alloy_refresh_token');
+    // Optionally redirect to login page
+    window.location.href = '/login';
+  };
+
+  const value = {
+    accessToken,
+    login,
+    logout,
+    isAuthenticated: !!accessToken,
+    isLoading,
+  };
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };
 
-export const NextAuthProvider = ({ children }: Props) => {
-  return <SessionProvider>{children}</SessionProvider>;
-};-e 
+export const useAuth = () => {
+  const context = useContext(AuthContext);
+  if (context === undefined) {
+    throw new Error('useAuth must be used within an AuthProvider');
+  }
+  return context;
+};
+
+// This component replaces the NextAuthProvider
+export const AppProviders = ({ children }: { children: React.ReactNode }) => {
+    return <AuthProvider>{children}</AuthProvider>
+}-e 
 -e
 
 File: web/src/hooks/use-mobile.ts
@@ -7303,9 +8294,12 @@ backend/src
 │       ├── __init__.py
 │       ├── __pycache__
 │       │   ├── __init__.cpython-313.pyc
-│       │   └── auth.cpython-313.pyc
+│       │   ├── auth.cpython-313.pyc
+│       │   ├── health.cpython-313.pyc
+│       │   └── reports.cpython-313.pyc
 │       ├── auth.py
-│       └── health.py
+│       ├── health.py
+│       └── reports.py
 ├── core
 │   ├── __pycache__
 │   │   ├── security.cpython-313.pyc
@@ -7319,33 +8313,40 @@ backend/src
 │   │   └── postgresql.cpython-313.pyc
 │   ├── models
 │   │   ├── __init__.py
-│   │   ├── __pycache__
-│   │   │   ├── __init__.cpython-313.pyc
-│   │   │   └── user.cpython-313.pyc
-│   │   ├── analysis.py
-│   │   ├── report.py
-│   │   └── user.py
+│   │   └── __pycache__
+│   │       ├── __init__.cpython-313.pyc
+│   │       ├── analysis.cpython-313.pyc
+│   │       ├── report.cpython-313.pyc
+│   │       └── user.cpython-313.pyc
 │   └── postgresql.py
 ├── main.py
+├── services
+│   ├── __pycache__
+│   │   └── report_generator.cpython-313.pyc
+│   └── report_generator.py
 └── utils
-    └── __init__.py
+    ├── __init__.py
+    └── __pycache__
+        └── __init__.cpython-313.pyc
 
-13 directories, 24 files
+16 directories, 29 files
 
 Web App Tree:
 web/src
 ├── app
 │   ├── (pages)
-│   │   └── (auth)
-│   │       ├── layout.tsx
-│   │       ├── login
+│   │   ├── (auth)
+│   │   │   ├── layout.tsx
+│   │   │   ├── login
+│   │   │   │   └── page.tsx
+│   │   │   ├── register
+│   │   │   │   └── page.tsx
+│   │   │   └── token
+│   │   │       └── page.tsx
+│   │   └── (authed)
+│   │       ├── dashboard
 │   │       │   └── page.tsx
-│   │       └── register
-│   │           └── page.tsx
-│   ├── api
-│   │   └── auth
-│   │       └── [...nextauth]
-│   │           └── route.ts
+│   │       └── layout.tsx
 │   ├── favicon.ico
 │   ├── globals.css
 │   ├── layout.tsx
@@ -7354,10 +8355,14 @@ web/src
 │   ├── auth
 │   │   └── AuthVisual.tsx
 │   ├── global
+│   │   ├── Breadcrumbs.tsx
+│   │   ├── CommandPalette.tsx
 │   │   ├── Footer.tsx
+│   │   ├── Header.tsx
 │   │   ├── Hero.tsx
 │   │   ├── Logo.tsx
-│   │   └── providers.tsx
+│   │   ├── providers.tsx
+│   │   └── Sidebar.tsx
 │   └── ui
 │       ├── accordion.tsx
 │       ├── alert-dialog.tsx
@@ -7410,7 +8415,7 @@ web/src
 └── lib
     └── utils.ts
 
-15 directories, 61 files
+15 directories, 67 files
 
 -----------------------
 

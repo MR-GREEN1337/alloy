@@ -10,23 +10,54 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { signIn } from "next-auth/react";
 import Link from "next/link";
 import { useState } from "react";
 import { FaGoogle } from "react-icons/fa";
+import { useAuth } from '@/components/global/providers';
+import { useRouter, useSearchParams } from 'next/navigation';
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const { login } = useAuth();
+  const router = useRouter();
+  const searchParams = useSearchParams();
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    await signIn("credentials", {
-      email,
-      password,
-      callbackUrl: "/dashboard", // Redirect to dashboard on success
-    });
+    setError(null);
+
+    const formData = new URLSearchParams();
+    formData.append('username', email);
+    formData.append('password', password);
+
+    try {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: formData.toString(),
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json();
+        setError(errorData.detail || "Login failed. Please check your credentials.");
+        return;
+      }
+      
+      const tokens = await res.json();
+      login(tokens.access_token, tokens.refresh_token);
+      router.push("/dashboard");
+
+    } catch (err) {
+      setError("An unexpected error occurred. Please try again.");
+    }
   };
+
+  // Google login is now a simple link to our backend
+  const googleAuthUrl = `${process.env.NEXT_PUBLIC_API_URL}/auth/google/authorize`;
 
   return (
     <Card className="w-full max-w-sm">
@@ -37,6 +68,8 @@ export default function LoginPage() {
         </CardDescription>
       </CardHeader>
       <CardContent>
+        {error && <p className="mb-4 text-center text-sm text-destructive">{error}</p>}
+        {searchParams.get('error') && <p className="mb-4 text-center text-sm text-destructive">Authentication failed. Please try again.</p>}
         <form onSubmit={handleLogin} className="space-y-4">
           <div className="space-y-2">
             <Label htmlFor="email">Email</Label>
@@ -69,9 +102,11 @@ export default function LoginPage() {
           <div className="flex-grow border-t border-muted" />
         </div>
         <div className="space-y-2">
-          <Button variant="outline" className="w-full" onClick={() => signIn('google')}>
-            <FaGoogle /> Log in with Google
-          </Button>
+            <Button variant="outline" className="w-full" asChild>
+                <a href={googleAuthUrl}>
+                    <FaGoogle className="mr-2"/> Log in with Google
+                </a>
+            </Button>
         </div>
       </CardContent>
       <CardFooter className="flex justify-center text-sm">

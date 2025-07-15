@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Link from 'next/link';
+import Logo from './Logo';
 
 // Helper component for glowing feature tags
 interface FeatureItemProps {
@@ -261,20 +262,7 @@ export const AlloyHeroSection: React.FC = () => {
           transition={{ duration: 0.5 }}
           className="px-4 backdrop-blur-3xl bg-black/50 rounded-full py-3 flex justify-between items-center"
         >
-          <div className="flex items-center">
-            <div className="text-2xl font-bold flex items-center gap-2">
-              <svg width="24" height="24" viewBox="0 0 40 40" fill="none" className="transform scale-75">
-                <path d="M20 5L5 20L20 35L35 20L20 5Z" stroke="white" strokeWidth="2" />
-              </svg>
-              Alloy
-            </div>
-            <div className="hidden md:flex items-center space-x-2 ml-8">
-              <button className="px-4 py-2 text-sm text-gray-300 hover:text-white hover:bg-white/5 rounded-full transition-colors">Features</button>
-              <button className="px-4 py-2 text-sm text-gray-300 hover:text-white hover:bg-white/5 rounded-full transition-colors">Pricing</button>
-              <button className="px-4 py-2 text-sm text-gray-300 hover:text-white hover:bg-white/5 rounded-full transition-colors">Case Studies</button>
-              <button className="px-4 py-2 text-sm text-gray-300 hover:text-white hover:bg-white/5 rounded-full transition-colors">Contact</button>
-            </div>
-          </div>
+          <Logo />
           <div className="flex items-center space-x-4">
             <Link href="/login">
               <button className="hidden md:block px-4 py-2 text-sm text-gray-300 hover:text-white transition-colors">Log In</button>

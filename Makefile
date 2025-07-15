@@ -1,4 +1,4 @@
-.PHONY: install backend web all stop
+.PHONY: install backend web all stop db-migrate db-upgrade db-downgrade
 
 install:
 	@echo "Installing dependencies for all services"
@@ -7,6 +7,24 @@ install:
 
 all:
 	backend web
+
+ifeq ($(M),)
+  MIGRATION_MESSAGE = "auto-migration"
+else
+  MIGRATION_MESSAGE = "$(M)"
+endif
+
+db-migrate:
+	@echo "  > Generating new database migration: $(MIGRATION_MESSAGE)..."
+	@cd backend && .venv/bin/alembic revision --autogenerate -m "$(MIGRATION_MESSAGE)"
+
+db-upgrade:
+	@echo "  > Applying database migrations..."
+	@cd backend && .venv/bin/alembic upgrade head
+
+db-downgrade:
+	@echo "  > Reverting last database migration..."
+	@cd backend && .venv/bin/alembic downgrade -1
 
 backend:
 	@echo "Starting backend"

@@ -14,7 +14,7 @@ from alembic import context
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.core.settings import get_settings
-from src.models import *  # Import all models to register them with SQLModel metadata
+from src.db.models import *  # Import all models to register them with SQLModel metadata
 from sqlmodel import SQLModel
 
 # --- END CUSTOM SETUP ---
@@ -75,7 +75,7 @@ def run_migrations_online() -> None:
 
     """
     # Get the configuration from alembic.ini
-    alembic_config = config.get_section(config.config_main_section)
+    alembic_config = config.get_section(config.config_ini_section)
     
     # Override the sqlalchemy.url from the .ini file with our secure settings
     alembic_config["sqlalchemy.url"] = settings.POSTGRES_DATABASE_URL

@@ -7,6 +7,7 @@ import json
 
 from src.db.postgresql import postgres_db
 from src.core.settings import get_settings
+from src.db.models import rebuild_all_models # <-- IMPORT THE FIX
 
 settings = get_settings()
 
@@ -31,17 +32,34 @@ class JsonLogFormatter:
         return json.dumps(log_object) + "\n"
 
 def setup_logging():
+    """
+    Configures logging.
+    Uses a structured JSON format for non-development environments
+    and Loguru's default, human-friendly format for development.
+    """
     logger.remove()
-    log_format = JsonLogFormatter().format if settings.ENVIRONMENT != "development" else None
-    logger.add(sys.stderr, level="INFO", format=log_format)
+    
+    if settings.ENVIRONMENT != "development":
+        # For production, staging, etc., use the JSON formatter
+        log_format = JsonLogFormatter().format
+        logger.add(sys.stderr, level="INFO", format=log_format)
+    else:
+        # For local development, use the default, colorful Loguru format
+        logger.add(sys.stderr, level="INFO")
 
 # --- Lifespan Manager ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # --- SETUP PHASE ---
     setup_logging()
     logger.info(f"Starting up in {settings.ENVIRONMENT} mode...")
     start_time = time.time()
     
+    # --- THIS IS THE FIX ---
+    # Resolve all model relationships before touching the database.
+    rebuild_all_models()
+    # --- END FIX ---
+
     try:
         await postgres_db.create_db_and_tables()
         logger.info("Database connection and tables verified.")
@@ -51,5 +69,9 @@ async def lifespan(app: FastAPI):
             raise RuntimeError("Database connection failed.") from e
 
     logger.info(f"Startup complete in {time.time() - start_time:.2f}s")
+    
+    # --- APPLICATION RUNNING ---
     yield
+    
+    # --- SHUTDOWN PHASE ---
     logger.info("Shutting down...")
