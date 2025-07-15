@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     # AI APIs
     QLOO_API_KEY: str
     GEMINI_API_KEY: str
+    GEMINI_MODEL_NAME: str = "gemini-2.5-flash"# for prod "gemini-2.5-pro"
+    TAVILY_API_KEY: str
     
     # Google OAuth
     GOOGLE_CLIENT_ID: str

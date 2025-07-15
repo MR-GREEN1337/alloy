@@ -65,6 +65,8 @@ class Settings(BaseSettings):
     # AI APIs
     QLOO_API_KEY: str
     GEMINI_API_KEY: str
+    GEMINI_MODEL_NAME: str = "gemini-2.5-flash"# for prod "gemini-2.5-pro"
+    TAVILY_API_KEY: str
     
     # Google OAuth
     GOOGLE_CLIENT_ID: str
@@ -187,162 +189,87 @@ settings = get_settings()
 
 class PostgresDatabase:
     def __init__(self):
-        # Get database URL from environment or settings
         self.DATABASE_URL = settings.POSTGRES_DATABASE_URL
         if not self.DATABASE_URL:
             logger.warning("DATABASE_URL not set, using development defaults")
-            self.DATABASE_URL = (
-                "postgresql+asyncpg://postgres:postgres@localhost:5432/ustadh"
-            )
-
-        # Parse the database URL
+            self.DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:5432/ustadh"
+        
         url = urlparse(self.DATABASE_URL)
-
-        # Create base URL without query parameters (removing sslmode if present)
         base_url = f"postgresql+asyncpg://{url.netloc}{url.path}"
-
-        # Store connection details for better error reporting
-        self.db_host = url.hostname
-        self.db_port = url.port or 5432
-        self.db_user = url.username
+        self.db_host, self.db_port, self.db_user = url.hostname, url.port or 5432, url.username
         self.db_name = url.path.lstrip("/") if url.path else None
+        self.schema = getattr(settings, "POSTGRES_SCHEMA", "public")
 
-        # Extract schema from settings or use default
-        self.schema = (
-            settings.POSTGRES_SCHEMA
-            if hasattr(settings, "POSTGRES_SCHEMA")
-            else "public"
-        )
-
-        # Create SSL context if needed
         ssl_context = None
         if settings.POSTGRES_USE_SSL:
-            ssl_context = ssl.create_default_context()
+            ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
             ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE  # For development
+            ssl_context.verify_mode = ssl.CERT_NONE
 
-        # Connection arguments
-        connect_args = {}
-        if ssl_context:
-            connect_args["ssl"] = ssl_context
+        connect_args = {"ssl": ssl_context} if ssl_context else {}
 
-        # Configure connection pool
         self.pool_size = settings.POSTGRES_POOL_SIZE
         self.max_overflow = settings.POSTGRES_MAX_OVERFLOW
         self.pool_timeout = settings.POSTGRES_POOL_TIMEOUT
-        self.pool_recycle = int(
-            os.getenv("POSTGRES_POOL_RECYCLE", "1800")
-        )  # 30 minutes
-
-        # Connection retry settings
+        self.pool_recycle = int(os.getenv("POSTGRES_POOL_RECYCLE", "1800"))
         self.max_retries = int(os.getenv("POSTGRES_MAX_RETRIES", "5"))
         self.retry_delay = int(os.getenv("POSTGRES_RETRY_DELAY", "2"))
-
-        # Debug mode for logging
         self.debug_mode = settings.DEBUG
 
-        # Create the async engine with configuration
         try:
             self.engine = create_async_engine(
-                base_url,  # Use base_url without query parameters
-                echo=self.debug_mode,
-                pool_size=self.pool_size,
-                max_overflow=self.max_overflow,
-                pool_timeout=self.pool_timeout,
-                pool_recycle=self.pool_recycle,
-                pool_pre_ping=True,
-                connect_args=connect_args,
+                base_url, echo=self.debug_mode, pool_size=self.pool_size, max_overflow=self.max_overflow,
+                pool_timeout=self.pool_timeout, pool_recycle=self.pool_recycle, pool_pre_ping=True, connect_args=connect_args
             )
-
-            # Create async session factory
-            self.async_session_maker = sessionmaker(
-                self.engine, class_=AsyncSession, expire_on_commit=False
-            )
-
-            logger.info(
-                f"PostgreSQL connection initialized: host={self.db_host}, "
-                f"user={self.db_user}, database={self.db_name}, "
-                f"schema={self.schema}, pool_size={self.pool_size}"
-            )
+            self.async_session_maker = sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
+            logger.info(f"PostgreSQL connection initialized: host={self.db_host}, user={self.db_user}, db={self.db_name}, schema={self.schema}")
         except Exception as e:
             logger.error(f"Failed to initialize PostgreSQL connection: {str(e)}")
             raise
 
     async def create_db_and_tables(self):
         """
-        Initialize database tables with retry logic.
-        Useful during application startup to ensure database is ready.
+        Initializes database tables. For development, it drops and recreates tables
+        to ensure the schema is always in sync with the models. For production,
+        it creates tables if they don't exist, but does not perform migrations.
         """
         retries = 0
         last_error = None
-
         while retries < self.max_retries:
             try:
-                logger.info(
-                    f"Attempting to connect to database (attempt {retries + 1})"
-                )
-
-                # Test connection first
-                async with self.async_session_maker() as session:
-                    result = await session.execute(text("SELECT 1"))
-                    # Fixed: Don't await the row, just get the scalar result
-                    value = result.scalar()
-                    logger.info(f"Database connection successful: {value}")
-
-                # Create schema if it doesn't exist
+                logger.info(f"Attempting to connect to database (attempt {retries + 1})")
                 async with self.engine.begin() as conn:
-                    await conn.execute(
-                        text(f"CREATE SCHEMA IF NOT EXISTS {self.schema}")
-                    )
-                    logger.info(f"Ensured schema '{self.schema}' exists")
+                    # Ensure the schema exists
+                    await conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {self.schema}"))
+                    
+                    # THE FIX: In a dev environment, ensure schema is always up-to-date.
+                    if settings.ENVIRONMENT == "development":
+                        logger.warning("DEV MODE: Dropping and recreating tables for schema sync.")
+                        await conn.run_sync(SQLModel.metadata.drop_all)
 
-                    # Set search path to include our schema
-                    await conn.execute(
-                        text(f"SET search_path TO {self.schema}, public")
-                    )
+                    # Create all tables. This is idempotent and will not
+                    # alter existing tables unless they were just dropped.
+                    await conn.run_sync(SQLModel.metadata.create_all)
 
-                    # Create tables in the specified schema
-                    await conn.run_sync(lambda conn: SQLModel.metadata.create_all(conn))
-
-                logger.info(
-                    f"PostgreSQL tables created or verified in schema '{self.schema}'"
-                )
+                logger.success("Database schema verified and ready.")
                 return True
 
             except Exception as e:
                 retries += 1
                 last_error = e
-
                 if retries < self.max_retries:
-                    wait_time = self.retry_delay * retries  # Exponential backoff
-                    logger.warning(
-                        f"Database connection failed: {str(e)}. "
-                        f"Retrying in {wait_time} seconds ({retries}/{self.max_retries})"
-                    )
+                    wait_time = self.retry_delay * retries
+                    logger.warning(f"DB connection failed: {str(e)}. Retrying in {wait_time}s ({retries}/{self.max_retries})")
                     await asyncio.sleep(wait_time)
                 else:
-                    logger.error(
-                        f"Failed to connect to database after {self.max_retries} attempts. "
-                        f"Last error: {str(last_error)}"
-                    )
-
-        # If we get here, all retries failed
+                    logger.error(f"Failed to connect to database after {self.max_retries} attempts. Last error: {str(last_error)}")
         raise last_error or RuntimeError("Failed to connect to database")
-
-    async def _set_schema(self, session):
-        """Set the search path to include our schema."""
-        await session.execute(text(f"SET search_path TO {self.schema}, public"))
 
     @asynccontextmanager
     async def get_session(self) -> AsyncGenerator[AsyncSession, None]:
-        """
-        Get async database session with automatic cleanup.
-        Uses context manager pattern for proper resource handling.
-        """
         async with self.async_session_maker() as session:
             try:
-                # Set schema for this session
-                await self._set_schema(session)
+                await session.execute(text(f"SET search_path TO {self.schema}, public"))
                 yield session
                 await session.commit()
             except Exception as e:
@@ -352,82 +279,28 @@ class PostgresDatabase:
             finally:
                 await session.close()
 
-    # For FastAPI dependency injection
     async def get_db_session(self) -> AsyncGenerator[AsyncSession, None]:
-        """Dependency for FastAPI to get an async database session."""
         async with self.get_session() as session:
             yield session
 
     async def health_check(self) -> Dict[str, Any]:
-        """
-        Check database connection health and return detailed status.
-        Useful for monitoring endpoints.
-        """
         start_time = datetime.utcnow()
-        status = {
-            "status": "error",
-            "message": "",
-            "details": {
-                "host": self.db_host,
-                "database": self.db_name,
-                "schema": self.schema,
-                "user": self.db_user,
-                "response_time_ms": None,
-            },
-        }
-
+        status = {"status": "error", "message": "", "details": {}}
         try:
             async with self.async_session_maker() as session:
-                await self._set_schema(session)  # Set schema
                 await session.execute(text("SELECT 1"))
-                end_time = datetime.utcnow()
-                response_time = (end_time - start_time).total_seconds() * 1000
-
-                status.update(
-                    {
-                        "status": "ok",
-                        "message": "Database connection successful",
-                        "details": {
-                            "host": self.db_host,
-                            "database": self.db_name,
-                            "schema": self.schema,
-                            "user": self.db_user,
-                            "response_time_ms": round(response_time, 2),
-                        },
-                    }
-                )
-                return status
-        except Exception as e:
             end_time = datetime.utcnow()
             response_time = (end_time - start_time).total_seconds() * 1000
+            status.update({"status": "ok", "message": "Database connection successful", "details": {"response_time_ms": round(response_time, 2)}})
+        except Exception as e:
+            status.update({"message": str(e)})
+        return status
 
-            status.update(
-                {
-                    "status": "error",
-                    "message": str(e),
-                    "details": {
-                        "host": self.db_host,
-                        "database": self.db_name,
-                        "schema": self.schema,
-                        "user": self.db_user,
-                        "response_time_ms": round(response_time, 2),
-                        "error": str(e),
-                    },
-                }
-            )
-            return status
-
-
-# Create a singleton instance
 postgres_db = PostgresDatabase()
 
-
-# For FastAPI dependency injection
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
-    """FastAPI dependency to get database session"""
     async for session in postgres_db.get_db_session():
-        yield session
--e 
+        yield session-e 
 -e
 
 File: backend/src/db/__init__.py
@@ -437,15 +310,18 @@ File: backend/src/db/__init__.py
 File: backend/src/db/models/__init__.py
 from __future__ import annotations
 import enum
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 from sqlmodel import Field, SQLModel, Relationship as SQLModelRelationship
 from sqlalchemy.orm import relationship
-from sqlalchemy import Column, DateTime, Enum as SAEnum, func, TEXT
+from sqlalchemy import Column, DateTime, func, TEXT, JSON
+
 from loguru import logger
 
 # --- Enums ---
+# These are now standard Python enums, not tied to the database type system.
 class ReportStatus(str, enum.Enum):
+    DRAFT = "DRAFT"
     PENDING = "PENDING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
@@ -465,28 +341,27 @@ class User(SQLModel, table=True):
     hashed_password: Optional[str] = Field(default=None, nullable=True)
     is_active: bool = Field(default=True)
     is_superuser: bool = Field(default=False)
-    created_at: datetime = Field(sa_column=Column(DateTime(timezone=True), server_default=func.now(), nullable=False))
-    updated_at: datetime = Field(sa_column=Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False))
+    created_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), server_default=func.now(), nullable=False))
+    updated_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False))
     
-    # DEFINITIVE FIX: Use sa_relationship to pass a pure SQLAlchemy relationship object.
     reports: List["Report"] = SQLModelRelationship(sa_relationship=relationship("Report", back_populates="user"))
 
 class Report(SQLModel, table=True):
     __tablename__ = 'report'
     id: Optional[int] = Field(default=None, primary_key=True)
-    title: str = Field(index=True)
-    acquirer_brand: str
-    target_brand: str
-    status: ReportStatus = Field(sa_column=Column(SAEnum(ReportStatus), nullable=False), default=ReportStatus.PENDING)
-    created_at: datetime = Field(sa_column=Column(DateTime(timezone=True), server_default=func.now(), nullable=False))
-    updated_at: datetime = Field(sa_column=Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False))
+    title: str = Field(index=True, default="Untitled Report")
+    acquirer_brand: Optional[str] = Field(default=None)
+    target_brand: Optional[str] = Field(default=None)
+    status: ReportStatus = Field(default=ReportStatus.DRAFT, sa_column=Column(TEXT, nullable=False))
+    extracted_file_context: Optional[str] = Field(default=None, sa_column=Column(TEXT))
+    created_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), server_default=func.now(), nullable=False))
+    updated_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False))
     user_id: int = Field(foreign_key="user.id")
 
-    # DEFINITIVE FIX: Use sa_relationship for ALL relationships, specifying `uselist=False` for one-to-one.
     user: "User" = SQLModelRelationship(sa_relationship=relationship("User", back_populates="reports"))
-    analysis: Optional["ReportAnalysis"] = SQLModelRelationship(sa_relationship=relationship("ReportAnalysis", back_populates="report", uselist=False))
-    culture_clashes: List["CultureClash"] = SQLModelRelationship(sa_relationship=relationship("CultureClash", back_populates="report"))
-    untapped_growths: List["UntappedGrowth"] = SQLModelRelationship(sa_relationship=relationship("UntappedGrowth", back_populates="report"))
+    analysis: Optional["ReportAnalysis"] = SQLModelRelationship(sa_relationship=relationship("ReportAnalysis", back_populates="report", uselist=False, cascade="all, delete-orphan"))
+    culture_clashes: List["CultureClash"] = SQLModelRelationship(sa_relationship=relationship("CultureClash", back_populates="report", cascade="all, delete-orphan"))
+    untapped_growths: List["UntappedGrowth"] = SQLModelRelationship(sa_relationship=relationship("UntappedGrowth", back_populates="report", cascade="all, delete-orphan"))
 
 class ReportAnalysis(SQLModel, table=True):
     __tablename__ = 'reportanalysis'
@@ -496,6 +371,9 @@ class ReportAnalysis(SQLModel, table=True):
     brand_archetype_summary: str = Field(sa_column=Column(TEXT))
     strategic_summary: str = Field(sa_column=Column(TEXT))
     report_id: int = Field(foreign_key="report.id")
+    search_sources: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON))
+    acquirer_sources: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON))
+    target_sources: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON))
     
     report: "Report" = SQLModelRelationship(sa_relationship=relationship("Report", back_populates="analysis"))
 
@@ -504,7 +382,7 @@ class CultureClash(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     topic: str = Field(index=True)
     description: str = Field(sa_column=Column(TEXT))
-    severity: ClashSeverity = Field(sa_column=Column(SAEnum(ClashSeverity)))
+    severity: ClashSeverity = Field(sa_column=Column(TEXT, nullable=False))
     report_id: int = Field(foreign_key="report.id")
     
     report: "Report" = SQLModelRelationship(sa_relationship=relationship("Report", back_populates="culture_clashes"))
@@ -518,7 +396,8 @@ class UntappedGrowth(SQLModel, table=True):
     
     report: "Report" = SQLModelRelationship(sa_relationship=relationship("Report", back_populates="untapped_growths"))
 
-# --- API Schemas (for request/response validation) ---
+
+# --- API Schemas ---
 class ReportCreate(SQLModel):
     title: str
     acquirer_brand: str
@@ -527,8 +406,8 @@ class ReportCreate(SQLModel):
 class ReportRead(SQLModel):
     id: int
     title: str
-    acquirer_brand: str
-    target_brand: str
+    acquirer_brand: Optional[str]
+    target_brand: Optional[str]
     status: ReportStatus
     created_at: datetime
     updated_at: datetime
@@ -537,11 +416,16 @@ class ReportRead(SQLModel):
     culture_clashes: List[CultureClash] = []
     untapped_growths: List[UntappedGrowth] = []
 
-# --- Lifespan Helper ---
+# DEFINITIVE FIX: Function to resolve all forward references before DB operations.
 def rebuild_all_models():
-    """Forces SQLModel/Pydantic to resolve all string-based forward references."""
+    """
+    This function forces the resolution of all forward-looking type hints
+    in SQLModel and Pydantic models. It's crucial to call this at startup
+    to prevent "type not defined" errors, especially in complex models
+    with inter-dependencies.
+    """
     logger.info("Rebuilding all model forward references...")
-    # Rebuilding is still good practice to ensure Pydantic models with forward refs are ready.
+    # Add any other models with forward references here if needed.
     ReportRead.model_rebuild()
     logger.success("Model forward references rebuilt successfully.")
 
@@ -792,103 +676,311 @@ def health_check(app_version: str = "0.1.0"):
 
 File: backend/src/api/v1/__init__.py
 from fastapi import APIRouter
-from . import auth, health, reports # Add reports
+from . import auth, health, reports, utils # Add reports
 
 router = APIRouter()
 
 router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 router.include_router(health.router, prefix="/health", tags=["Health"])
 router.include_router(reports.router, prefix="/reports", tags=["Reports"]) # Add this line
+router.include_router(utils.router, prefix="/utils", tags=["Utilities"])
 
 __all__ = ["router"]-e 
 -e
 
-File: backend/src/api/v1/reports.py
-from fastapi import APIRouter, Depends, HTTPException, status
-from typing import List
-from sqlmodel import select
-from sqlalchemy.ext.asyncio import AsyncSession
+File: backend/src/api/v1/utils.py
+from fastapi import APIRouter, Query, HTTPException, status
+from fastapi.responses import RedirectResponse
 import httpx
-import json
-
-from src.db.postgresql import get_session
-from src.db import models # <-- MODIFIED: Use the models package
-from src.api.v1.auth import get_current_user
-from src.services.report_generator import (
-    get_qloo_taste_data,
-    calculate_affinity_overlap,
-    find_culture_clashes,
-    find_untapped_growth,
-    generate_llm_insights
-)
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse, urljoin
+from loguru import logger
 
 router = APIRouter()
 
-@router.post("/", response_model=models.ReportRead, status_code=status.HTTP_201_CREATED) # <-- MODIFIED
-async def create_report(
-    report_in: models.ReportCreate, # <-- MODIFIED
-    session: AsyncSession = Depends(get_session),
-    current_user: models.User = Depends(get_current_user) # <-- MODIFIED
+@router.get("/favicon", response_class=RedirectResponse, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+async def get_favicon(url: str = Query(...)):
+    """
+    Finds and redirects to the favicon for a given URL.
+    """
+    if not url.startswith('http'):
+        url = 'https://' + url
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
+        try:
+            # 1. First, try the default /favicon.ico path
+            base_url = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+            ico_url = urljoin(base_url, "/favicon.ico")
+            
+            ico_check = await client.head(ico_url)
+            if ico_check.status_code == 200 and 'image' in ico_check.headers.get('content-type', ''):
+                logger.info(f"Found favicon for {url} at default /favicon.ico")
+                return RedirectResponse(url=ico_url)
+
+            # 2. If not found, fetch the page and parse HTML for <link> tags
+            logger.info(f"Checking HTML for favicon link in {url}")
+            response = await client.get(url)
+            response.raise_for_status()
+
+            soup = BeautifulSoup(response.text, "lxml")
+            
+            # Prioritized list of rel attributes
+            icon_rels = ["icon", "shortcut icon", "apple-touch-icon"]
+            icon_link = None
+            for rel in icon_rels:
+                icon_link = soup.find("link", rel=rel)
+                if icon_link:
+                    break
+
+            if icon_link and icon_link.has_attr("href"):
+                favicon_href = icon_link["href"]
+                # Resolve relative URLs
+                favicon_url = urljoin(response.url, favicon_href)
+                logger.success(f"Successfully found favicon for {url} at {favicon_url}")
+                return RedirectResponse(url=favicon_url)
+            
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Favicon not found in HTML or at default location.")
+
+        except httpx.RequestError as e:
+            logger.warning(f"Could not fetch URL {url}: {e}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Could not fetch the provided URL: {e}")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while fetching favicon for {url}: {e}")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An internal error occurred.")-e 
+-e
+
+File: backend/src/api/v1/reports.py
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from typing import List, Optional
+from sqlmodel import select, SQLModel
+from sqlalchemy.orm import selectinload
+from sqlalchemy.ext.asyncio import AsyncSession
+import httpx
+from datetime import datetime
+from fastapi.responses import StreamingResponse
+import asyncio
+import json
+
+from src.db.postgresql import get_session
+from src.db import models
+from src.api.v1.auth import get_current_user
+from src.services.report_generator import (
+    get_corporate_profile_via_search,
+    get_cultural_profile_via_qloo,
+    calculate_affinity_overlap,
+    find_culture_clashes,
+    find_untapped_growth,
+    generate_llm_insights,
+    generate_chat_response
+)
+from src.services.docling import process_document_with_docling
+from loguru import logger
+
+router = APIRouter()
+
+class ReportGeneratePayload(SQLModel):
+    acquirer_brand: str
+    target_brand: str
+    title: str
+    context: Optional[str] = None # This will now only be for user notes
+    use_grounding: bool = False
+
+class DraftReportResponse(SQLModel):
+    id: int
+    status: models.ReportStatus
+    created_at: datetime
+    user_id: int
+
+class ReportChatPayload(SQLModel):
+    query: str
+    context: str
+
+class FileUploadResponse(SQLModel):
+    filename: str
+    content_type: str
+    size_in_bytes: int
+    message: str = "File processed successfully."
+
+@router.post("/draft", response_model=DraftReportResponse, status_code=status.HTTP_201_CREATED)
+async def create_draft_report(session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
+    logger.info(f"User {current_user.email} creating new draft report.")
+    new_report = models.Report(user_id=current_user.id, status=models.ReportStatus.DRAFT)
+    session.add(new_report)
+    await session.commit()
+    await session.refresh(new_report)
+    logger.success(f"Draft report {new_report.id} created for user {current_user.email}.")
+    return new_report
+
+@router.post("/{report_id}/upload_context_file", response_model=FileUploadResponse)
+async def upload_context_file(
+    report_id: int, 
+    file: UploadFile = File(...), 
+    session: AsyncSession = Depends(get_session), 
+    current_user: models.User = Depends(get_current_user)
 ):
-    # 1. Create initial report record in DB
-    report = models.Report.model_validate(report_in, update={"user_id": current_user.id}) # <-- MODIFIED
+    logger.info(f"User {current_user.email} uploading file '{file.filename}' for report {report_id}")
+    report = await session.get(models.Report, report_id)
+    if not report or report.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found or access denied.")
+
+    # Process file using the Docling service
+    extracted_text = await process_document_with_docling(file)
+
+    # Save extracted text to the report
+    report.extracted_file_context = extracted_text
     session.add(report)
     await session.commit()
-    await session.refresh(report)
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        acquirer_data = await get_qloo_taste_data(report.acquirer_brand, client)
-        target_data = await get_qloo_taste_data(report.target_brand, client)
-    
-    if not acquirer_data or not target_data:
-        report.status = "FAILED"
-        session.add(report)
-        await session.commit()
-        raise HTTPException(status_code=404, detail="Could not retrieve taste data for one or both brands.")
-
-    # 2. Perform Analysis
-    affinity_score = calculate_affinity_overlap(acquirer_data, target_data)
-    clashes = find_culture_clashes(acquirer_data, target_data)
-    opportunities = find_untapped_growth(acquirer_data, target_data)
-
-    # 3. Generate LLM Insights
-    acquirer_taste_str = ", ".join([item['name'] for item in acquirer_data[:15]])
-    target_taste_str = ", ".join([item['name'] for item in target_data[:15]])
-    llm_insights = await generate_llm_insights(acquirer_taste_str, target_taste_str)
-
-    # 4. Save analysis results to the database
-    analysis = models.ReportAnalysis( # <-- MODIFIED
-        report_id=report.id,
-        cultural_compatibility_score=affinity_score,
-        affinity_overlap_score=affinity_score, # Can be the same for now
-        brand_archetype_summary=llm_insights['brand_archetype_summary'],
-        strategic_summary=llm_insights['strategic_summary']
+    logger.success(f"Saved extracted context from '{file.filename}' to report {report_id}")
+    return FileUploadResponse(
+        filename=file.filename,
+        content_type=file.content_type,
+        size_in_bytes=file.size
     )
-    session.add(analysis)
 
-    for clash in clashes:
-        session.add(models.CultureClash(report_id=report.id, **clash)) # <-- MODIFIED
+@router.post("/{report_id}/generate")
+async def generate_full_report_stream(
+    report_id: int, payload: ReportGeneratePayload, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)
+):
     
-    for opportunity in opportunities:
-        session.add(models.UntappedGrowth(report_id=report.id, **opportunity)) # <-- MODIFIED
+    async def event_generator():
+        def yield_event(data: dict):
+            return f"data: {json.dumps(data)}\n\n"
 
-    report.status = "COMPLETED"
-    session.add(report)
-    await session.commit()
-    await session.refresh(report)
+        logger.info(f"User {current_user.email} starting stream generation for draft ID: {report_id}")
+        report = None
+        
+        try:
+            report = await session.get(models.Report, report_id)
+            if not report or report.user_id != current_user.id or report.status != models.ReportStatus.DRAFT:
+                yield yield_event({"status": "error", "message": "Draft report not found or has been generated."})
+                return
 
+            report.acquirer_brand = payload.acquirer_brand
+            report.target_brand = payload.target_brand
+            report.title = payload.title
+            report.status = models.ReportStatus.PENDING
+            session.add(report)
+            await session.commit()
+            yield yield_event({"status": "info", "message": f"Starting analysis for {payload.acquirer_brand} vs. {payload.target_brand}"})
+
+            yield yield_event({"status": "search", "message": f"Researching Acquirer: {payload.acquirer_brand}"})
+            acquirer_search_result = await get_corporate_profile_via_search(report.acquirer_brand)
+            acquirer_profile = acquirer_search_result["context_str"]
+            acquirer_sources = acquirer_search_result.get("sources", [])
+            for source in acquirer_sources:
+                yield yield_event({"status": "source", "payload": source})
+            
+            yield yield_event({"status": "search", "message": f"Researching Target: {payload.target_brand}"})
+            target_search_result = await get_corporate_profile_via_search(report.target_brand)
+            target_profile = target_search_result["context_str"]
+            target_sources = target_search_result.get("sources", [])
+            for source in target_sources:
+                yield yield_event({"status": "source", "payload": source})
+
+            yield yield_event({"status": "qloo", "message": "Analyzing cultural DNA via Qloo API"})
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                acquirer_qloo_data, target_qloo_data = await asyncio.gather(
+                    get_cultural_profile_via_qloo(acquirer_profile, report.acquirer_brand, client),
+                    get_cultural_profile_via_qloo(target_profile, report.target_brand, client)
+                )
+
+            affinity_score = calculate_affinity_overlap(acquirer_qloo_data, target_qloo_data)
+            clashes = find_culture_clashes(acquirer_qloo_data, target_qloo_data)
+            opportunities = find_untapped_growth(acquirer_qloo_data, target_qloo_data)
+            acquirer_tastes_str = ", ".join([item['name'] for item in acquirer_qloo_data[:20]])
+            target_tastes_str = ", ".join([item['name'] for item in target_qloo_data[:20]])
+
+            # Combine contexts
+            user_notes = payload.context or ""
+            file_context = report.extracted_file_context or ""
+            full_user_context = f"USER NOTES:\n{user_notes}\n\nDOCUMENT CONTEXT:\n{file_context}".strip()
+            
+            yield yield_event({"status": "synthesis", "message": "Synthesizing strategic insights with Gemini"})
+            llm_insights = await generate_llm_insights(
+                acquirer_brand=report.acquirer_brand, target_brand=report.target_brand,
+                acquirer_profile=acquirer_profile, target_profile=target_profile,
+                acquirer_tastes=acquirer_tastes_str, target_tastes=target_tastes_str,
+                use_grounding=payload.use_grounding, user_context=full_user_context
+            )
+            
+            yield yield_event({"status": "saving", "message": "Saving final analysis to database"})
+            analysis = models.ReportAnalysis(
+                report_id=report.id,
+                cultural_compatibility_score=affinity_score,
+                affinity_overlap_score=affinity_score,
+                brand_archetype_summary=llm_insights['brand_archetype_summary'],
+                strategic_summary=llm_insights['strategic_summary'],
+                search_sources=llm_insights.get('sources', []),
+                acquirer_sources=acquirer_sources,
+                target_sources=target_sources
+            )
+            session.add(analysis)
+            for clash in clashes: session.add(models.CultureClash(report_id=report.id, **clash))
+            for opportunity in opportunities: session.add(models.UntappedGrowth(report_id=report.id, **opportunity))
+            
+            report.status = models.ReportStatus.COMPLETED
+            session.add(report)
+            await session.commit()
+            logger.success(f"Streamed Report {report.id} completed successfully.")
+
+            yield yield_event({"status": "complete", "message": "Report generated successfully!", "reportId": report_id})
+
+        except Exception as e:
+            logger.error(f"Stream generation failed for report {report_id}: {e}", exc_info=True)
+            if report:
+                report.status = models.ReportStatus.FAILED
+                session.add(report)
+                await session.commit()
+            yield yield_event({"status": "error", "message": f"An unexpected error occurred: {e}"})
+    
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@router.post("/{report_id}/chat", response_class=StreamingResponse)
+async def chat_with_report(report_id: int, payload: ReportChatPayload, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
+    report = await session.get(models.Report, report_id)
+    if not report or report.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found.")
+    logger.info(f"User {current_user.email} is chatting with report {report_id}.")
+    async def stream_response():
+        try:
+            async for chunk in generate_chat_response(payload.query, payload.context):
+                yield chunk
+        except Exception as e:
+            logger.error(f"Error during chat stream for report {report_id}: {e}")
+            yield "Sorry, I encountered an error while processing your request."
+    return StreamingResponse(stream_response(), media_type="text/event-stream")
+
+@router.get("/", response_model=List[models.ReportRead])
+async def get_reports(session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
+    statement = (select(models.Report).where(models.Report.user_id == current_user.id, models.Report.status != models.ReportStatus.DRAFT).order_by(models.Report.created_at.desc()).options(selectinload(models.Report.analysis), selectinload(models.Report.culture_clashes), selectinload(models.Report.untapped_growths)))
+    result = await session.execute(statement)
+    reports = result.scalars().all()
+    return reports
+
+@router.get("/{report_id}", response_model=models.ReportRead)
+async def get_report(report_id: int, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
+    statement = (select(models.Report).where(models.Report.id == report_id, models.Report.user_id == current_user.id).options(selectinload(models.Report.analysis), selectinload(models.Report.culture_clashes), selectinload(models.Report.untapped_growths)))
+    result = await session.execute(statement)
+    report = result.scalar_one_or_none()
+    if not report or report.status == models.ReportStatus.DRAFT:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
     return report
 
-
-@router.get("/", response_model=List[models.ReportRead]) # <-- MODIFIED
-async def get_reports(
-    session: AsyncSession = Depends(get_session),
-    current_user: models.User = Depends(get_current_user) # <-- MODIFIED
-):
-    """Fetches all reports for the currently logged-in user."""
-    statement = select(models.Report).where(models.Report.user_id == current_user.id).order_by(models.Report.created_at.desc()) # <-- MODIFIED
-    reports = (await session.execute(statement)).all()
-    return reports-e 
+@router.delete("/{report_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_report(report_id: int, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
+    logger.info(f"User {current_user.email} attempting to delete report {report_id}")
+    statement = select(models.Report).where(models.Report.id == report_id, models.Report.user_id == current_user.id)
+    result = await session.execute(statement)
+    report_to_delete = result.scalar_one_or_none()
+    if not report_to_delete:
+        logger.warning(f"Delete failed: Report {report_id} not found or user {current_user.email} does not have permission.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
+    await session.delete(report_to_delete)
+    await session.commit()
+    logger.success(f"Successfully deleted report {report_id} for user {current_user.email}")
+    return-e 
 -e
 
 File: backend/src/api/__init__.py
@@ -926,242 +1018,775 @@ app.add_middleware(
 app.include_router(api_router, prefix="/api/v1", tags=["System"])-e 
 -e
 
+File: backend/src/services/docling.py
+from fastapi import UploadFile, HTTPException, status
+from loguru import logger
+import openpyxl
+from pypdf import PdfReader
+import io
+
+async def process_document_with_docling(file: UploadFile) -> str:
+    """
+    Simulates a "Docling" service.
+    Processes an uploaded file (PDF, XLSX, TXT, MD) and extracts text content.
+    """
+    content_type = file.content_type
+    logger.info(f"Processing file '{file.filename}' with content type: {content_type}")
+    
+    file_bytes = await file.read()
+    text_content = ""
+
+    try:
+        if content_type == "application/pdf":
+            reader = PdfReader(io.BytesIO(file_bytes))
+            for page in reader.pages:
+                text_content += page.extract_text() or ""
+        
+        elif content_type in ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel"]:
+            workbook = openpyxl.load_workbook(io.BytesIO(file_bytes))
+            for sheet_name in workbook.sheetnames:
+                sheet = workbook[sheet_name]
+                text_content += f"\n--- Sheet: {sheet_name} ---\n"
+                for row in sheet.iter_rows():
+                    row_text = "\t".join([str(cell.value) if cell.value is not None else "" for cell in row])
+                    text_content += row_text + "\n"
+
+        elif content_type in ["text/plain", "text/markdown"]:
+            text_content = file_bytes.decode("utf-8")
+
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail=f"Unsupported file type: {content_type}. Please upload PDF, Excel, TXT, or MD files."
+            )
+            
+        logger.success(f"Successfully extracted text from '{file.filename}'.")
+        return text_content.strip()
+
+    except Exception as e:
+        logger.error(f"Failed to process file '{file.filename}': {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to process file: {str(e)}"
+        )-e 
+-e
+
 File: backend/src/services/report_generator.py
 import httpx
 import google.generativeai as genai
-from typing import List, Dict, Any
+from typing import List, Dict, Any, AsyncGenerator
 from loguru import logger
 import json
+import asyncio
 
 from src.core.settings import get_settings
+from src.services.search import tavily_search
+
+settings = get_settings()
+genai.configure(api_key=settings.GEMINI_API_KEY)
+QLOO_BASE_URL = "https://hackathon.api.qloo.com"
+
+# ... (get_corporate_profile_via_search and get_cultural_profile_via_qloo are unchanged)
+async def get_corporate_profile_via_search(brand_name: str) -> Dict[str, Any]:
+    """
+    Performs a Tavily search and returns the entire result object,
+    including the context string and the list of sources.
+    """
+    logger.info(f"Performing Tavily search for corporate profile of '{brand_name}'")
+    query = f"Corporate profile, brand identity, key products, and target audience for '{brand_name}'"
+    search_result = await tavily_search(query)
+    return search_result
+
+async def get_cultural_profile_via_qloo(corporate_profile: str, brand_name: str, client: httpx.AsyncClient) -> List[Dict]:
+    logger.info(f"Extracting cultural proxies for '{brand_name}'")
+    proxy_extraction_model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
+    prompt = f"From the following text about '{brand_name}', extract up to 5 of the most culturally significant and well-known entities (movies, artists, TV shows, specific well-known product names like 'iPhone' or 'Model S', etc.). Return them as a simple comma-separated list. TEXT: {corporate_profile}"
+    try:
+        response = await proxy_extraction_model.generate_content_async(prompt)
+        proxy_names = [name.strip() for name in response.text.split(',')]
+        logger.success(f"Extracted proxies for '{brand_name}': {proxy_names}")
+    except Exception as e:
+        logger.error(f"Failed to extract proxies for '{brand_name}': {e}")
+        return []
+
+    if not proxy_names: return []
+    payload = {"signal": { "interests": { "entities": { "query": proxy_names } } }, "filter": { "type": "urn:entity:brand" }, "take": 50}
+    insights_endpoint = f"{QLOO_BASE_URL}/v2/insights"
+    headers = {"x-api-key": settings.QLOO_API_KEY}
+    try:
+        logger.info(f"Querying Qloo with proxies for '{brand_name}'")
+        qloo_response = await client.post(insights_endpoint, json=payload, headers=headers)
+        qloo_response.raise_for_status()
+        return qloo_response.json().get('data', [])
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Qloo Insights API error for '{brand_name}' proxies: {e.response.status_code} - {e.response.text}")
+        return []
+
+
+# --- Analysis Functions (Unchanged) ---
+def calculate_affinity_overlap(acquirer_data: List[Dict], target_data: List[Dict]) -> float:
+    if not acquirer_data or not target_data: return 0.0
+    acquirer_interests = {item.get('name') for item in acquirer_data if item.get('name')}
+    target_interests = {item.get('name') for item in target_data if item.get('name')}
+    intersection = len(acquirer_interests.intersection(target_interests))
+    union = len(acquirer_interests.union(target_interests))
+    return round((intersection / union) * 100, 2) if union > 0 else 0.0
+def find_culture_clashes(acquirer_data: List[Dict], target_data: List[Dict]) -> List[Dict[str, Any]]:
+    acquirer_interests = {item.get('name') for item in acquirer_data if item.get('name')}
+    target_interests = {item.get('name') for item in target_data if item.get('name')}
+    unique_to_acquirer = acquirer_interests - target_interests
+    unique_to_target = target_interests - acquirer_interests
+    clashes = []
+    for interest in list(unique_to_acquirer)[:5]:
+        clashes.append({"topic": interest, "description": "Audience shows strong affinity for this, a taste not shared by the Target's audience.", "severity": "MEDIUM"})
+    for interest in list(unique_to_target)[:5]:
+         clashes.append({"topic": interest, "description": "Audience shows strong affinity for this, a taste not shared by the Acquirer's audience.", "severity": "HIGH"})
+    return clashes
+def find_untapped_growth(acquirer_data: List[Dict], target_data: List[Dict]) -> List[Dict[str, Any]]:
+    #...
+    acquirer_interests = {item.get('name') for item in acquirer_data if item.get('name')}
+    target_interests = {item.get('name') for item in target_data if item.get('name')}
+    shared_interests = acquirer_interests.intersection(target_interests)
+    opportunities = []
+    for interest in list(shared_interests)[:5]:
+        opportunities.append({"description": f"Both audiences show a strong affinity for '{interest}'. This shared passion point could be a key pillar for joint marketing campaigns and product integrations post-acquisition.", "potential_impact_score": 8})
+    return opportunities
+
+
+async def generate_llm_insights(acquirer_brand: str, target_brand: str, acquirer_profile: str, target_profile: str, acquirer_tastes: str, target_tastes: str, use_grounding: bool, user_context: str | None) -> Dict[str, Any]:
+    model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
+    
+    search_results_context = ""
+    search_sources = []
+    grounding_instruction = "Analyze based *only* on the Corporate Profiles, Qloo taste data, and any user-provided context."
+    
+    if use_grounding:
+        logger.info("Internet grounding is enabled. Performing Tavily search...")
+        search_query = f"Cultural compatibility, brand identity, and audience overlap between '{acquirer_brand}' and '{target_brand}'"
+        search_result = await tavily_search(search_query)
+        search_results_context = f"\n**Data Source 3: Current Events & Analysis (from Tavily Search)**\n{search_result['context_str']}\n"
+        search_sources = search_result['sources']
+        grounding_instruction = "Synthesize a comprehensive analysis using all data sources: Corporate Profiles, Qloo taste data, user-provided context, AND the following real-time search results."
+
+    context_section = f"\n**User-Provided Context:**\n{user_context}\n" if user_context else ""
+    
+    prompt = f"""
+    As an expert M&A brand strategist, provide a deep cultural analysis for the acquisition of **{target_brand}** by **{acquirer_brand}**.
+    {grounding_instruction}
+
+    **Data Source 1: Corporate Profiles**
+    - **{acquirer_brand} Profile:** {acquirer_profile}
+    - **{target_brand} Profile:** {target_profile}
+
+    **Data Source 2: Cultural Taste Profiles (from Qloo API via proxy analysis)**
+    - **{acquirer_brand} Audience Tastes:** {acquirer_tastes}
+    - **{target_brand} Audience Tastes:** {target_tastes}
+    {context_section}
+    {search_results_context}
+    **Required Output Format:**
+    Return a single, valid JSON object with exactly two keys: "brand_archetype_summary" and "strategic_summary".
+
+    1.  **brand_archetype_summary (Stringified JSON):** Create a JSON string with keys "acquirer_archetype" and "target_archetype". For each, write a concise, 2-3 sentence paragraph describing the brand's core identity, values, and audience persona. Synthesize this from all available information.
+
+    2.  **strategic_summary (String):** Write a 3-4 sentence high-level executive summary for a board of directors. Synthesize all findings to explain the overall cultural compatibility. Base your assessment on how the corporate identities align and where the cultural tastes overlap or clash. Highlight the primary risks and the most significant strategic opportunities from the combined data. Be decisive and clear.
+    """
+    try:
+        response = await model.generate_content_async(prompt)
+        cleaned_response = response.text.strip().replace('```json', '').replace('```', '')
+        llm_json = json.loads(cleaned_response)
+        # Add sources to the returned dictionary
+        llm_json['sources'] = search_sources
+        return llm_json
+    except Exception as e:
+        logger.error(f"Gemini generation failed: {e}")
+        return {"brand_archetype_summary": '{"acquirer_archetype": "Error generating analysis.", "target_archetype": "Error generating analysis."}', "strategic_summary": "Could not generate AI-powered strategic summary due to an API error.", "sources": []}
+
+# ... (generate_chat_response remains the same)
+async def generate_chat_response(query: str, report_context: str) -> AsyncGenerator[str, None]:
+    model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
+    prompt = f"""
+    You are an expert M&A analyst acting as a follow-up assistant. Your sole task is to answer the user's question based *only* on the provided report context. Do not use any outside knowledge or make up information. If the answer is not in the context, state that clearly. Provide concise, professional answers. Format your response using Markdown.
+    ---
+    **REPORT CONTEXT:**
+    {report_context}
+    ---
+    **USER'S QUESTION:**
+    {query}
+    ---
+    **YOUR ANSWER:**
+    """
+    try:
+        response_stream = await model.generate_content_async(prompt, stream=True)
+        async for chunk in response_stream:
+            yield chunk.text
+    except Exception as e:
+        logger.error(f"Gemini chat stream failed: {e}")
+        yield "There was an error processing your request. Please try again."-e 
+-e
+
+File: backend/src/services/search.py
+from tavily import TavilyClient
+from src.core.settings import get_settings
+from loguru import logger
+from typing import Dict, List, Any
 
 settings = get_settings()
 
-# --- Configure APIs ---
-genai.configure(api_key=settings.GEMINI_API_KEY)
-QLOO_BASE_URL = "https://api.qloo.com/v2"
-
-# --- Qloo API Service ---
-async def get_qloo_taste_data(brand_name: str, client: httpx.AsyncClient) -> List[Dict[str, Any]]:
-    """Fetches the top 50 taste affinities for a given brand from Qloo."""
-    headers = {"x-api-key": settings.QLOO_API_KEY}
-    # First, find the entity ID for the brand name
-    search_params = {"q": brand_name, "type": "brand", "limit": 1}
-    try:
-        search_response = await client.get(f"{QLOO_BASE_URL}/search", params=search_params, headers=headers)
-        search_response.raise_for_status()
-        search_results = search_response.json()
-        if not search_results or not search_results.get('data'):
-            logger.warning(f"Qloo: No entity found for brand '{brand_name}'")
-            return []
-        
-        brand_id = search_results['data'][0]['id']
-        logger.info(f"Qloo: Found entity ID '{brand_id}' for brand '{brand_name}'")
-
-        # Now, get the audience affinities for that brand ID
-        taste_params = {"id": [brand_id]}
-        taste_response = await client.get(f"{QLOO_BASE_URL}/taste-affinities/audiences", params=taste_params, headers=headers)
-        taste_response.raise_for_status()
-        
-        return taste_response.json().get('data', [])
-
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Qloo API error for '{brand_name}': {e.response.status_code} - {e.response.text}")
-        return []
-    except Exception as e:
-        logger.error(f"An unexpected error occurred while fetching Qloo data for '{brand_name}': {e}")
-        return []
-
-# --- Analysis Service ---
-def calculate_affinity_overlap(acquirer_data: List[Dict], target_data: List[Dict]) -> float:
-    """Calculates a Jaccard similarity score for affinity overlap."""
-    if not acquirer_data or not target_data:
-        return 0.0
-    
-    acquirer_interests = {item['name'] for item in acquirer_data}
-    target_interests = {item['name'] for item in target_data}
-
-    intersection = len(acquirer_interests.intersection(target_interests))
-    union = len(acquirer_interests.union(target_interests))
-    
-    return round((intersection / union) * 100, 2) if union > 0 else 0.0
-
-def find_culture_clashes(acquirer_data: List[Dict], target_data: List[Dict]) -> List[Dict[str, Any]]:
-    """Identifies potential culture clashes based on divergent tastes."""
-    acquirer_interests = {item['name'] for item in acquirer_data}
-    target_interests = {item['name'] for item in target_data}
-
-    clashes = []
-    # Find what's unique to the acquirer's audience
-    for item in acquirer_data:
-        if item['name'] not in target_interests:
-            clashes.append({"topic": item['name'], "description": f"Highly popular with Acquirer's audience but not with Target's.", "severity": "MEDIUM"})
-
-    # Find what's unique to the target's audience
-    for item in target_data:
-        if item['name'] not in acquirer_interests:
-             clashes.append({"topic": item['name'], "description": f"Highly popular with Target's audience but not with Acquirer's.", "severity": "MEDIUM"})
-
-    return clashes[:10] # Limit to top 10 for brevity
-
-def find_untapped_growth(acquirer_data: List[Dict], target_data: List[Dict]) -> List[Dict[str, Any]]:
-    """Identifies untapped growth opportunities."""
-    shared_interests = {item['name'] for item in acquirer_data}.intersection({item['name'] for item in target_data})
-    
-    opportunities = []
-    for interest in list(shared_interests)[:5]: # Look at top 5 shared interests
-        opportunities.append({
-            "description": f"Both audiences show a strong affinity for '{interest}'. This shared passion point could be a key pillar for joint marketing campaigns and product integrations post-acquisition.",
-            "potential_impact_score": 8 # Example score
-        })
-    return opportunities
-
-# --- Gemini (LLM) Service ---
-async def generate_llm_insights(acquirer_tastes: str, target_tastes: str) -> Dict[str, str]:
-    """Generates brand and strategic summaries using Gemini, based on Qloo data."""
-    model = genai.GenerativeModel('gemini-pro')
-    prompt = f"""
-    Act as an expert brand strategist specializing in Mergers & Acquisitions.
-    Your task is to analyze the raw cultural taste data for two brands: an Acquirer and a Target.
-    Based *only* on the provided data, generate two distinct summaries. Do not use any outside knowledge.
-
-    **CONTEXT - RAW TASTE DATA:**
-
-    *   **Acquirer Audience Top Affinities:** {acquirer_tastes}
-    *   **Target Audience Top Affinities:** {target_tastes}
-
-    **YOUR TASKS:**
-
-    1.  **Brand Archetype Summary (as JSON string):** 
-        Deduce the personality and "archetype" of each brand's audience. Describe who they are, what they value, and their overall cultural posture. Format this as a JSON string with two keys: "acquirer_archetype" and "target_archetype".
-
-    2.  **Strategic Summary (as a single string):** 
-        Write a high-level executive summary that synthesizes the findings. Explain the cultural compatibility, highlight the primary risks based on taste clashes, and identify the most significant strategic opportunities revealed by the data overlap.
-
-    **OUTPUT FORMAT:**
-    Return a single, valid JSON object with two top-level keys: "brand_archetype_summary" and "strategic_summary". The value for "brand_archetype_summary" must be a stringified JSON.
+async def tavily_search(query: str) -> Dict[str, Any]:
     """
-    
-    try:
-        response = await model.generate_content_async(prompt)
-        # Clean up the response to ensure it's valid JSON
-        cleaned_response = response.text.strip().replace('```json', '').replace('```', '')
-        return json.loads(cleaned_response)
-    except Exception as e:
-        logger.error(f"Gemini generation failed: {e}")
+    Performs a search using the Tavily API and returns a structured dictionary
+    containing the formatted results for an LLM and a list of sources.
+    """
+    if not settings.TAVILY_API_KEY:
+        logger.warning("Tavily API key is not set. Skipping search.")
         return {
-            "brand_archetype_summary": '{"acquirer_archetype": "Error generating analysis.", "target_archetype": "Error generating analysis."}',
-            "strategic_summary": "Could not generate AI-powered strategic summary due to an API error."
+            "context_str": "Tavily search was not performed because the API key is missing.",
+            "sources": []
+        }
+
+    try:
+        client = TavilyClient(api_key=settings.TAVILY_API_KEY)
+        response = client.search(
+            query=query,
+            search_depth="advanced",
+            max_results=5
+        )
+
+        # Format the results into a string for the LLM prompt
+        context_str = "\n\n".join(
+            [f"Title: {res['title']}\nURL: {res['url']}\nContent: {res['content']}" for res in response['results']]
+        )
+        
+        # Extract sources for storage and display
+        sources = [{"title": res.get("title", ""), "url": res.get("url", "")} for res in response.get('results', [])]
+        
+        logger.success(f"Tavily search successful for query: '{query}'")
+        return {
+            "context_str": context_str,
+            "sources": sources
+        }
+
+    except Exception as e:
+        logger.error(f"An error occurred during Tavily search: {e}")
+        return {
+            "context_str": f"An error occurred during the search: {str(e)}",
+            "sources": []
         }-e 
+-e
+
+File: web/src/types/report.ts
+export interface Report {
+    id: number;
+    title: string;
+    acquirer_brand: string;
+    target_brand: string;
+    status: 'PENDING' | 'COMPLETED' | 'FAILED' | 'DRAFT';
+    created_at: string;
+    updated_at: string;
+    user_id: number;
+    analysis: ReportAnalysis | null;
+    culture_clashes: CultureClash[];
+    untapped_growths: UntappedGrowth[];
+  }
+  
+  export interface ReportAnalysis {
+    id: number;
+    cultural_compatibility_score: number;
+    affinity_overlap_score: number;
+    brand_archetype_summary: string; 
+    strategic_summary: string;
+    report_id: number;
+    search_sources?: { title: string; url: string; }[];
+    acquirer_sources?: { title: string; url: string; }[];
+    target_sources?: { title: string; url: string; }[];
+  }
+  
+  export type ClashSeverity = 'LOW' | 'MEDIUM' | 'HIGH';
+  
+  export interface CultureClash {
+    id: number;
+    topic: string;
+    description: string;
+    severity: ClashSeverity;
+    report_id: number;
+  }
+  
+  export interface UntappedGrowth {
+    id: number;
+    description: string;
+    potential_impact_score: number;
+    report_id: number;
+  }-e 
+-e
+
+File: web/src/app/(pages)/(authed)/dashboard/settings/page.tsx
+"use client";
+
+import React, { useState } from 'react';
+import { useAuth } from '@/components/global/providers';
+import { useTheme } from 'next-themes';
+import { Button } from '@/components/ui/button';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+  DialogClose,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
+import { toast } from 'sonner';
+import { Sun, Moon, Laptop } from 'lucide-react';
+
+export default function SettingsPage() {
+  const { user } = useAuth();
+  const { setTheme } = useTheme();
+
+  // State for forms
+  const [fullName, setFullName] = useState(user?.full_name || '');
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  
+  // State for support dialog
+  const [supportSubject, setSupportSubject] = useState('');
+  const [supportMessage, setSupportMessage] = useState('');
+  const [isSupportDialogOpen, setIsSupportDialogOpen] = useState(false);
+
+  const handleProfileSave = (e: React.FormEvent) => {
+    e.preventDefault();
+    toast.success('Profile updated successfully.');
+  };
+
+  const handlePasswordChange = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newPassword !== confirmPassword) {
+      toast.error('New passwords do not match.');
+      return;
+    }
+    if (newPassword.length < 8) {
+      toast.error('New password must be at least 8 characters long.');
+      return;
+    }
+    
+    // Simulate API call
+    const promise = new Promise((resolve) => setTimeout(resolve, 1500));
+    toast.promise(promise, {
+      loading: 'Updating password...',
+      success: () => {
+        setCurrentPassword('');
+        setNewPassword('');
+        setConfirmPassword('');
+        return 'Password updated successfully.';
+      },
+      error: 'Failed to update password.',
+    });
+  };
+
+  const handleSupportSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!supportSubject.trim() || !supportMessage.trim()) {
+      toast.error("Please fill out both subject and message fields.");
+      return;
+    }
+
+    // Simulate sending the message
+    const promise = () => new Promise((resolve) => setTimeout(resolve, 2000));
+    toast.promise(promise, {
+      loading: 'Sending your message to our support team...',
+      success: () => {
+        setIsSupportDialogOpen(false);
+        setSupportSubject('');
+        setSupportMessage('');
+        return "Your message has been sent. We'll get back to you shortly.";
+      },
+      error: 'Failed to send message. Please try again.',
+    });
+  };
+
+  return (
+    <div className="grid gap-6">
+      <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-bold">Settings</h1>
+      </div>
+      
+      <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {/* Profile Card */}
+        <Card className="lg:col-span-1">
+          <CardHeader>
+            <CardTitle>My Profile</CardTitle>
+            <CardDescription>Update your personal information.</CardDescription>
+          </CardHeader>
+          <form onSubmit={handleProfileSave}>
+            <CardContent className="space-y-4">
+              <div className="space-y-1">
+                <Label htmlFor="fullName">Full Name</Label>
+                <Input id="fullName" value={fullName} onChange={(e) => setFullName(e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="email">Email</Label>
+                <Input id="email" type="email" value={user?.email || ''} disabled />
+              </div>
+            </CardContent>
+            <CardFooter className="border-t px-6 py-4">
+              <Button type="submit">Save Changes</Button>
+            </CardFooter>
+          </form>
+        </Card>
+
+        {/* Security Card */}
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle>Security</CardTitle>
+            <CardDescription>Manage your password and account security.</CardDescription>
+          </CardHeader>
+          <form onSubmit={handlePasswordChange}>
+            <CardContent className="space-y-4">
+               <div className="space-y-1">
+                <Label htmlFor="currentPassword">Current Password</Label>
+                <Input id="currentPassword" type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} />
+              </div>
+              <div className="grid md:grid-cols-2 gap-4">
+                <div className="space-y-1">
+                  <Label htmlFor="newPassword">New Password</Label>
+                  <Input id="newPassword" type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="confirmPassword">Confirm New Password</Label>
+                  <Input id="confirmPassword" type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} />
+                </div>
+              </div>
+            </CardContent>
+            <CardFooter className="border-t px-6 py-4">
+              <Button type="submit">Update Password</Button>
+            </CardFooter>
+          </form>
+        </Card>
+
+        {/* Interface Card */}
+        <Card>
+            <CardHeader>
+                <CardTitle>Interface</CardTitle>
+                <CardDescription>Customize the look and feel of the application.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid grid-cols-3 gap-2">
+                <Button variant="outline" onClick={() => setTheme('light')}><Sun className="mr-2 h-4 w-4" />Light</Button>
+                <Button variant="outline" onClick={() => setTheme('dark')}><Moon className="mr-2 h-4 w-4" />Dark</Button>
+                <Button variant="outline" onClick={() => setTheme('system')}><Laptop className="mr-2 h-4 w-4" />System</Button>
+            </CardContent>
+        </Card>
+
+        {/* Support Card */}
+        <Card className="lg:col-span-2">
+            <CardHeader>
+                <CardTitle>Support</CardTitle>
+                <CardDescription>Need help? Contact our support team directly.</CardDescription>
+            </CardHeader>
+            <CardContent>
+                <p className="text-sm text-muted-foreground mb-4">
+                    If you encounter any issues or have questions about your analysis, please don't hesitate to reach out. Our team of specialists is available to assist you.
+                </p>
+                <Dialog open={isSupportDialogOpen} onOpenChange={setIsSupportDialogOpen}>
+                    <DialogTrigger asChild>
+                        <Button>Contact Support</Button>
+                    </DialogTrigger>
+                    <DialogContent className="sm:max-w-[425px]">
+                        <form onSubmit={handleSupportSubmit}>
+                            <DialogHeader>
+                                <DialogTitle>Contact Support</DialogTitle>
+                                <DialogDescription>
+                                    Describe your issue below. A support ticket will be created and we'll respond via email.
+                                </DialogDescription>
+                            </DialogHeader>
+                            <div className="grid gap-4 py-4">
+                                <div className="space-y-2">
+                                    <Label htmlFor="subject" className="text-right">Subject</Label>
+                                    <Input id="subject" value={supportSubject} onChange={(e) => setSupportSubject(e.target.value)} placeholder="e.g., Issue with Report #12345" />
+                                </div>
+                                <div className="space-y-2">
+                                    <Label htmlFor="message" className="text-right">Message</Label>
+                                    <Textarea id="message" value={supportMessage} onChange={(e) => setSupportMessage(e.target.value)} placeholder="Please provide as much detail as possible..." className="min-h-[120px]" />
+                                </div>
+                            </div>
+                            <DialogFooter>
+                                <DialogClose asChild><Button type="button" variant="ghost">Cancel</Button></DialogClose>
+                                <Button type="submit">Send Message</Button>
+                            </DialogFooter>
+                        </form>
+                    </DialogContent>
+                </Dialog>
+            </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}-e 
 -e
 
 File: web/src/app/(pages)/(authed)/dashboard/page.tsx
 "use client";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { useAuth } from "@/components/global/providers";
-import useSWR from 'swr';
-import useSWRMutation from 'swr/mutation';
+
 import { useState } from "react";
-
-// --- SWR Fetcher and Mutator ---
-const fetcher = (url: string, token: string) => 
-  fetch(url, { headers: { 'Authorization': `Bearer ${token}` } }).then(res => res.json());
-
-async function createReport(url: string, { arg }: { arg: { acquirer_brand: string, target_brand: string, token: string } }) {
-  const { token, ...body } = arg;
-  return fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`
-    },
-    body: JSON.stringify(body)
-  }).then(res => {
-    if (!res.ok) throw new Error('Failed to create report.');
-    return res.json();
-  });
-}
-
+import { PromptInputBox } from "@/components/global/PromptInputBox";
+import { DashboardGreeting } from "@/components/global/DashboardGreeting";
+import { useAuth } from "@/components/global/providers";
+import { useRouter } from "next/navigation";
 
 export default function DashboardPage() {
-    const { accessToken } = useAuth();
-    const { data: reports, error, mutate } = useSWR(
-        accessToken ? [`${process.env.NEXT_PUBLIC_API_URL}/reports/`, accessToken] : null,
-        ([url, token]) => fetcher(url, token)
-    );
-    
-    const { trigger, isMutating } = useSWRMutation(
-        `${process.env.NEXT_PUBLIC_API_URL}/reports/`,
-        createReport
-    );
+    const { isLoading } = useAuth();
+    const router = useRouter();
+    const [isPristine, setIsPristine] = useState(true);
 
-    const [acquirer, setAcquirer] = useState("");
-    const [target, setTarget] = useState("");
-
-    const handleGenerateReport = async () => {
-        try {
-            await trigger({
-                acquirer_brand: acquirer,
-                target_brand: target,
-                title: `${acquirer} vs. ${target}`,
-                token: accessToken!
-            });
-            mutate(); // Re-fetch the list of reports after creating a new one
-            setAcquirer("");
-            setTarget("");
-        } catch (error) {
-            console.error(error);
-            // You can use a toast library to show an error message here
-        }
+    const onReportCreated = () => {
+        // After a report is created, reset the state and redirect
+        setIsPristine(true);
+        router.push('/dashboard/reports');
     };
+
+    if (isLoading) {
+      return <div className="flex h-full items-center justify-center"><p>Loading...</p></div>
+    }
     
     return (
-        <div className="space-y-6">
-            <Card>
-                <CardHeader>
-                    <CardTitle>Create New Alloy Report</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div className="space-y-2">
-                            <Label htmlFor="acquirer">Acquirer Brand</Label>
-                            <Input id="acquirer" placeholder="e.g., Disney" value={acquirer} onChange={e => setAcquirer(e.target.value)} />
-                        </div>
-                        <div className="space-y-2">
-                            <Label htmlFor="target">Target Brand</Label>
-                            <Input id="target" placeholder="e.g., A24 Films" value={target} onChange={e => setTarget(e.target.value)} />
-                        </div>
-                    </div>
-                    <Button onClick={handleGenerateReport} disabled={isMutating || !acquirer || !target}>
-                        {isMutating ? 'Analyzing Taste DNA...' : 'Generate Report'}
-                    </Button>
-                </CardContent>
-            </Card>
-
-            <Card>
-                <CardHeader>
-                    <CardTitle>Recent Reports</CardTitle>
-                </CardHeader>
-                <CardContent>
-                    {error && <div>Failed to load reports.</div>}
-                    {!reports && !error && <div>Loading reports...</div>}
-                    {reports && (
-                        <ul className="space-y-2">
-                           {reports.map((report: any) => (
-                               <li key={report.id} className="p-2 border rounded-md">
-                                   <p className="font-medium">{report.title}</p>
-                                   <p className="text-sm text-muted-foreground">Status: {report.status}</p>
-                                   <p className="text-sm text-muted-foreground">Compatibility Score: {report.analysis?.cultural_compatibility_score || 'N/A'}</p>
-                               </li>
-                           ))}
-                        </ul>
-                    )}
-                </CardContent>
-            </Card>
+        <div className="relative flex flex-col items-center justify-center h-[calc(100vh-8rem)] w-full transition-all duration-500 ease-in-out">
+            {/* Subtle background pattern */}
+            <div 
+              className="absolute inset-0 z-[-1] h-full w-full bg-transparent"
+              style={{
+                backgroundImage: 'linear-gradient(to right, hsl(var(--border) / 0.4) 1px, transparent 1px), linear-gradient(to bottom, hsl(var(--border) / 0.4) 1px, transparent 1px)',
+                backgroundSize: '36px 36px',
+                maskImage: 'radial-gradient(ellipse 80% 50% at 50% 0%, #000 70%, transparent 110%)'
+              }}
+            />
+            
+            <DashboardGreeting isVisible={isPristine} />
+            
+            <div className="w-full max-w-3xl px-4">
+                <PromptInputBox 
+                  onReportCreated={onReportCreated} 
+                  onPristineChange={setIsPristine} 
+                />
+            </div>
         </div>
+    );
+}-e 
+-e
+
+File: web/src/app/(pages)/(authed)/dashboard/reports/[id]/page.tsx
+"use client";
+
+import useSWR from 'swr';
+import { useAuth } from '@/components/global/providers';
+import { ReportView, ReportViewSkeleton } from '@/components/report/ReportView';
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { AlertCircle } from 'lucide-react';
+import { useParams } from 'next/navigation';
+
+const fetcher = (url: string, token: string) => 
+  fetch(url, { headers: { 'Authorization': `Bearer ${token}` } }).then(res => {
+    if (!res.ok) {
+        if (res.status === 404) {
+            throw new Error('Report not found. You may not have access or it may not exist.');
+        }
+        throw new Error('An error occurred while fetching the report.');
+    }
+    return res.json();
+  });
+
+export default function ReportPage() {
+    const { id } = useParams<{ id: string }>();
+    const { accessToken } = useAuth();
+    const { data: report, error, isLoading } = useSWR(
+        accessToken ? [`${process.env.NEXT_PUBLIC_API_URL}/reports/${id}`, accessToken] : null,
+        ([url, token]) => fetcher(url, token)
+    );
+
+    if (isLoading) {
+        return <ReportViewSkeleton />;
+    }
+
+    if (error) {
+        return (
+             <div className="container mx-auto py-10">
+                <Alert variant="destructive">
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertTitle>Error</AlertTitle>
+                    <AlertDescription>{error.message}</AlertDescription>
+                </Alert>
+            </div>
+        )
+    }
+
+    if (!report) {
+        return null;
+    }
+
+    // The main view is now full-height, no container needed here.
+    return <ReportView report={report} />;
+}-e 
+-e
+
+File: web/src/app/(pages)/(authed)/dashboard/reports/page.tsx
+"use client";
+
+import Link from "next/link";
+import useSWRMutation from 'swr/mutation';
+import { useAuth } from '@/components/global/providers';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Skeleton } from "@/components/ui/skeleton";
+import { AlertCircle, CheckCircle, Clock, PlusCircle, Trash2, XCircle } from "lucide-react";
+import { Report } from "@/types/report";
+import { toast } from "sonner";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import useSWR from "swr";
+
+// --- SWR Handlers ---
+const fetcher = (url: string, token: string): Promise<Report[]> => 
+  fetch(url, { headers: { 'Authorization': `Bearer ${token}` } }).then(res => {
+    if (!res.ok) throw new Error('An error occurred while fetching reports.');
+    return res.json();
+  });
+
+async function deleteReport(url: string, { arg }: { arg: { reportId: number, token: string } }) {
+    const response = await fetch(`${url}${arg.reportId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${arg.token}` }
+    });
+    if (!response.ok && response.status !== 204) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to delete report.');
+    }
+}
+
+// --- Components ---
+const StatusBadge = ({ status }: { status: Report['status'] }) => {
+    const config = {
+        COMPLETED: { variant: 'default', icon: CheckCircle, text: 'Completed', className: 'bg-green-500/20 text-green-700 border-green-500/30 dark:text-green-400' },
+        PENDING: { variant: 'secondary', icon: Clock, text: 'In Progress', className: 'bg-yellow-500/20 text-yellow-700 border-yellow-500/30 dark:text-yellow-400' },
+        FAILED: { variant: 'destructive', icon: XCircle, text: 'Failed', className: 'bg-red-500/20 text-red-700 border-red-500/30 dark:text-red-400' },
+    }[status] || { variant: 'secondary', icon: Clock, text: 'Unknown' };
+    return <Badge variant={config.variant} className={config.className}><config.icon className="mr-1 h-3 w-3" />{config.text}</Badge>;
+};
+
+// --- Main Reports Page Component ---
+export default function ReportsPage() {
+    const { accessToken } = useAuth();
+    const API_URL = process.env.NEXT_PUBLIC_API_URL;
+    const { data: reports, error, mutate, isLoading } = useSWR(
+        accessToken ? [`${API_URL}/reports/`, accessToken] : null,
+        ([url, token]) => fetcher(url, token)
+    );
+    const { trigger: triggerDelete } = useSWRMutation(`${API_URL}/reports/`, deleteReport);
+
+    const handleDelete = async (reportId: number) => {
+        toast.info("Deleting report...");
+        try {
+            await triggerDelete({ reportId, token: accessToken! });
+            toast.success("Report deleted successfully.");
+            mutate(reports?.filter(r => r.id !== reportId), false);
+        } catch (err: any) {
+            toast.error("Deletion Failed", { description: err.message });
+        }
+    };
+
+    const renderContent = () => {
+        if (isLoading) {
+            return (
+                <Table>
+                    <TableHeader><TableRow><TableHead>Report</TableHead><TableHead>Score</TableHead><TableHead>Status</TableHead><TableHead>Date</TableHead><TableHead><span className="sr-only">Actions</span></TableHead></TableRow></TableHeader>
+                    <TableBody>{[...Array(5)].map((_, i) => (<TableRow key={i}><TableCell><Skeleton className="h-5 w-48" /></TableCell><TableCell><Skeleton className="h-5 w-12" /></TableCell><TableCell><Skeleton className="h-6 w-20" /></TableCell><TableCell><Skeleton className="h-5 w-32" /></TableCell><TableCell className="flex gap-2"><Skeleton className="h-8 w-20" /><Skeleton className="h-8 w-8" /></TableCell></TableRow>))}</TableBody>
+                </Table>
+            );
+        }
+
+        if (error) {
+            return <Alert variant="destructive"><AlertCircle className="h-4 w-4" /><AlertTitle>Error Loading Reports</AlertTitle><AlertDescription>{error.message}</AlertDescription></Alert>;
+        }
+
+        if (reports && reports.length === 0) {
+            return (
+                <div className="text-center py-16"><h3 className="text-xl font-semibold">No reports found</h3><p className="text-muted-foreground mt-2 mb-4">Get started by creating your first cultural analysis.</p><Button asChild><Link href="/dashboard"><PlusCircle className="mr-2 h-4 w-4" />Create New Report</Link></Button></div>
+            );
+        }
+
+        if (reports) {
+            return (
+                <Table>
+                    <TableHeader><TableRow><TableHead className="w-[40%]">Report</TableHead><TableHead>Score</TableHead><TableHead>Status</TableHead><TableHead>Date</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader>
+                    <TableBody>
+                        {reports.map((report) => (
+                            <TableRow key={report.id}>
+                                <TableCell className="font-medium">{report.title}</TableCell>
+                                <TableCell className="font-semibold">{report.analysis?.cultural_compatibility_score ?? '--'}</TableCell>
+                                <TableCell><StatusBadge status={report.status} /></TableCell>
+                                <TableCell className="text-muted-foreground">{new Date(report.created_at).toLocaleDateString()}</TableCell>
+                                <TableCell className="text-right space-x-2">
+                                    <Button asChild variant="outline" size="sm"><Link href={`/dashboard/reports/${report.id}`}>View</Link></Button>
+                                    <AlertDialog>
+                                        <AlertDialogTrigger asChild><Button variant="ghost" size="icon" className="text-muted-foreground hover:text-destructive"><Trash2 className="h-4 w-4" /></Button></AlertDialogTrigger>
+                                        <AlertDialogContent>
+                                            <AlertDialogHeader><AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle><AlertDialogDescription>This action cannot be undone. This will permanently delete the report for "{report.title}".</AlertDialogDescription></AlertDialogHeader>
+                                            <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction onClick={() => handleDelete(report.id)} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">Delete Report</AlertDialogAction></AlertDialogFooter>
+                                        </AlertDialogContent>
+                                    </AlertDialog>
+                                </TableCell>
+                            </TableRow>
+                        ))}
+                    </TableBody>
+                </Table>
+            );
+        }
+
+        return null;
+    };
+
+    return (
+        <Card>
+            <CardHeader className="flex flex-row items-center justify-between">
+                <div><CardTitle>My Reports</CardTitle><CardDescription>A complete history of all generated cultural analyses.</CardDescription></div>
+                <Button asChild><Link href="/dashboard"><PlusCircle className="mr-2 h-4 w-4" />Create New Report</Link></Button>
+            </CardHeader>
+            <CardContent>{renderContent()}</CardContent>
+        </Card>
     );
 }-e 
 -e
@@ -1205,11 +1830,11 @@ export default function AuthedLayout({
         enableSystem
         disableTransitionOnChange
     >
-        <div className="flex min-h-screen w-full flex-col bg-muted/40">
-            < Sidebar />
-            <div className="flex flex-col sm:gap-4 sm:py-4 sm:pl-14">
-                  <Header />
-                    <main className="grid flex-1 items-start gap-4 p-4 sm:px-6 sm:py-0 md:gap-8">
+        <div className="flex min-h-screen w-full flex-col bg-background">
+            <Sidebar />
+            <div className="flex flex-col sm:pl-14">
+                <Header />
+                <main className="grid flex-1 items-start gap-4 p-4 sm:px-6 sm:py-4 md:gap-8">
                     {children}
                 </main>
             </div>
@@ -1391,6 +2016,11 @@ export default function RegisterPage() {
 -e
 
 File: web/src/app/(pages)/(auth)/layout.tsx
+"use client";
+
+import { useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { useAuth } from '@/components/global/providers';
 import { AuthVisual } from "@/components/auth/AuthVisual";
 import Logo from "@/components/global/Logo";
 import Link from "next/link";
@@ -1400,6 +2030,27 @@ export default function AuthLayout({
 }: {
   children: React.ReactNode;
 }) {
+  const { isAuthenticated, isLoading } = useAuth();
+  const router = useRouter();
+
+  useEffect(() => {
+    // Wait for the auth state to be determined
+    if (!isLoading && isAuthenticated) {
+      // If user is authenticated, redirect them to the dashboard
+      router.replace('/dashboard');
+    }
+  }, [isLoading, isAuthenticated, router]);
+
+  // While loading or if authenticated (and about to be redirected), show a loading screen
+  if (isLoading || isAuthenticated) {
+    return (
+      <div className="flex h-screen w-full items-center justify-center bg-background">
+        Loading...
+      </div>
+    );
+  }
+
+  // Only show the auth layout if the user is not authenticated
   return (
     <div className="bg-background text-foreground relative flex min-h-screen w-full font-sans">
       <div className="absolute top-6 left-6 z-10">
@@ -1557,6 +2208,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { AppProviders } from "@/components/global/providers";
 import Footer from "@/components/global/Footer";
+import { Toaster } from "@/components/ui/sonner";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -1578,33 +2230,13 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const footerLeftLinks = [
-    { href: "#", label: "Affinity Overlap Score" },
-    { href: "#", label: "Culture Clash Report" },
-    { href: "#", label: "Untapped Growth Analysis" },
-    { href: "#", label: "AI-Powered Brand Archetyping" },
-  ];
-  const footerRightLinks = [
-    { href: "/login", label: "Log In" },
-    { href: "/login", label: "Request a Demo" },
-    { href: "https://devpost.com/software/alloy-cultural-due-diligence", label: "Devpost Hackathon Submission" },
-  ];
-  const problemStatement = "M&A failures are costly, often rooted in unforeseen cultural clashes. Billions are lost when executive 'gut feel' misses the mark on brand incompatibility.";
-  const solutionStatement = "Alloy replaces guesswork with data. We provide a quantifiable Cultural Compatibility Score by analyzing audience taste profiles, de-risking acquisitions and illuminating the human element of a deal.";
-
   return (
     <html lang="en">
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-black`}
       >
         <AppProviders>{children}</AppProviders>
-        <Footer
-          leftLinks={footerLeftLinks}
-          rightLinks={footerRightLinks}
-          copyrightText="The Cultural Due Diligence Platform."
-          problemStatement={problemStatement}
-          solutionStatement={solutionStatement}
-        />
+      <Toaster />
       </body>
     </html>
   );
@@ -1614,12 +2246,38 @@ export default function RootLayout({
 File: web/src/app/page.tsx
 "use client"
 
-import { AlloyHeroSection } from '@/components/global/Hero'
+import { AlloyHeroSection, FeaturesSection } from '@/components/global/Hero'
 import React from 'react'
+import Footer from '@/components/global/Footer'
 
 function page() {
+
+    const footerLeftLinks = [
+      { href: "#", label: "Affinity Overlap Score" },
+      { href: "#", label: "Culture Clash Report" },
+      { href: "#", label: "Untapped Growth Analysis" },
+      { href: "#", label: "AI-Powered Brand Archetyping" },
+    ];
+    const footerRightLinks = [
+      { href: "/login", label: "Log In" },
+      { href: "/login", label: "Request a Demo" },
+      { href: "https://devpost.com/software/alloy-cultural-due-diligence", label: "Devpost Hackathon Submission" },
+    ];
+    const problemStatement = "M&A failures are costly, often rooted in unforeseen cultural clashes. Billions are lost when executive 'gut feel' misses the mark on brand incompatibility.";
+    const solutionStatement = "Alloy replaces guesswork with data. We provide a quantifiable Cultural Compatibility Score by analyzing audience taste profiles, de-risking acquisitions and illuminating the human element of a deal.";
+  
   return (
-    <AlloyHeroSection />
+    <>
+      <AlloyHeroSection />
+      <FeaturesSection />
+      <Footer
+        leftLinks={footerLeftLinks}
+        rightLinks={footerRightLinks}
+        copyrightText="The Cultural Due Diligence Platform."
+        problemStatement={problemStatement}
+        solutionStatement={solutionStatement}
+      />
+    </>
   )
 }
 
@@ -7104,11 +7762,582 @@ export const AuthVisual = () => {
 };-e 
 -e
 
+File: web/src/components/report/AIAnalystChat.tsx
+"use client";
+
+import React, { useState, useRef, useEffect } from 'react';
+import { useAuth } from '@/components/global/providers';
+import { Button } from '@/components/ui/button';
+import { Textarea } from '@/components/ui/textarea';
+import ReactMarkdown from "react-markdown";
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Bot, User, CornerDownLeft, Loader2 } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { Report } from '@/types/report';
+import { toast } from 'sonner';
+
+interface Message {
+  id: string;
+  sender: 'user' | 'bot';
+  text: string;
+}
+
+interface AIAnalystChatProps {
+  report: Report;
+}
+
+export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
+  const { accessToken } = useAuth();
+  const API_URL = process.env.NEXT_PUBLIC_API_URL;
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const scrollAreaRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    // Scroll to bottom when new messages are added
+    if (scrollAreaRef.current) {
+      scrollAreaRef.current.scrollTo({ top: scrollAreaRef.current.scrollHeight, behavior: 'smooth' });
+    }
+  }, [messages]);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!input.trim() || isLoading) return;
+
+    const userMessage: Message = { id: `user-${Date.now()}`, sender: 'user', text: input };
+    setMessages(prev => [...prev, userMessage]);
+    setInput('');
+    setIsLoading(true);
+
+    const botMessageId = `bot-${Date.now()}`;
+    setMessages(prev => [...prev, { id: botMessageId, sender: 'bot', text: '' }]);
+
+    try {
+        const reportContext = `
+        Report Title: ${report.title}
+        Acquirer: ${report.acquirer_brand}
+        Target: ${report.target_brand}
+        Compatibility Score: ${report.analysis?.cultural_compatibility_score}
+        Strategic Summary: ${report.analysis?.strategic_summary}
+        Culture Clashes: ${report.culture_clashes.map(c => `- ${c.topic}: ${c.description} (Severity: ${c.severity})`).join('\n')}
+        Untapped Growth: ${report.untapped_growths.map(g => `- ${g.description} (Impact: ${g.potential_impact_score})`).join('\n')}
+      `;
+
+      const res = await fetch(`${API_URL}/reports/${report.id}/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${accessToken}`
+        },
+        body: JSON.stringify({ query: input, context: reportContext })
+      });
+
+      if (!res.ok || !res.body) {
+        throw new Error('Failed to get chat response from server.');
+      }
+      
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let done = false;
+
+      while (!done) {
+        const { value, done: readerDone } = await reader.read();
+        done = readerDone;
+        const chunk = decoder.decode(value);
+        setMessages(prev => prev.map(msg => 
+            msg.id === botMessageId ? { ...msg, text: msg.text + chunk } : msg
+        ));
+      }
+
+    } catch (error: any) {
+        toast.error("Chat Error", { description: error.message });
+        setMessages(prev => prev.filter(msg => msg.id !== botMessageId));
+    } finally {
+        setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col h-full bg-background/50 border-l border-border">
+      <div className="p-4 border-b border-border">
+        <h3 className="font-semibold text-lg text-foreground">AI Analyst Chat</h3>
+        <p className="text-sm text-muted-foreground">Ask questions about this report.</p>
+      </div>
+      <ScrollArea className="flex-grow p-4" ref={scrollAreaRef}>
+        <div className="space-y-6">
+            <AnimatePresence>
+            {messages.length === 0 && (
+                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-center text-muted-foreground text-sm pt-8">
+                    Ask a follow-up question like "Summarize the key risks" or "Expand on the opportunity with [topic]".
+                </motion.div>
+            )}
+            {messages.map(message => (
+                <motion.div
+                    key={message.id}
+                    layout
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.3 }}
+                    className={cn(
+                        "flex items-start gap-3 w-full",
+                        message.sender === 'user' ? "justify-end" : "justify-start"
+                    )}
+                >
+                    {message.sender === 'bot' && <div className="flex-shrink-0 bg-muted rounded-full p-2"><Bot className="h-4 w-4" /></div>}
+                    <div className={cn(
+                        "max-w-md rounded-lg px-4 py-2 text-sm prose prose-sm dark:prose-invert prose-p:my-2",
+                        message.sender === 'bot' ? 'bg-muted rounded-bl-none' : 'bg-primary text-primary-foreground rounded-br-none'
+                    )}>
+                        <ReactMarkdown>{message.text}</ReactMarkdown>
+                        {isLoading && message.id.startsWith('bot-') && messages[messages.length-1].id === message.id && <span className="inline-block w-2 h-4 bg-foreground ml-1 animate-pulse" />}
+                    </div>
+                    {message.sender === 'user' && <div className="flex-shrink-0 bg-primary/20 rounded-full p-2"><User className="h-4 w-4" /></div>}
+                </motion.div>
+            ))}
+            </AnimatePresence>
+        </div>
+      </ScrollArea>
+      <div className="p-4 border-t border-border bg-background">
+        <form onSubmit={handleSubmit} className="relative">
+          <Textarea
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    handleSubmit(e);
+                }
+            }}
+            placeholder="Ask a follow-up..."
+            className="pr-12 min-h-[40px] max-h-48"
+            disabled={isLoading}
+          />
+          <Button type="submit" size="icon" className="absolute right-2 bottom-1.5 h-8 w-8" disabled={isLoading || !input.trim()}>
+            {isLoading ? <Loader2 className="h-4 w-4 animate-spin"/> : <CornerDownLeft className="h-4 w-4" />}
+          </Button>
+        </form>
+      </div>
+    </div>
+  );
+};-e 
+-e
+
+File: web/src/components/report/ReportView.tsx
+"use client";
+
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Separator } from "@/components/ui/separator";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { AlertTriangle, TrendingUp, Zap, Link as LinkIcon, Globe, Users, Target } from "lucide-react";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Report, ClashSeverity } from "@/types/report";
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
+import { AIAnalystChat } from "./AIAnalystChat";
+import Image from "next/image";
+import Link from "next/link";
+import { ScrollArea } from "../ui/scroll-area";
+
+interface ReportViewProps {
+  report: Report;
+}
+
+const CompanyLogo = ({ url, brandName }: { url: string; brandName: string }) => {
+    const API_URL = process.env.NEXT_PUBLIC_API_URL;
+    // Use the provided URL to fetch the favicon
+    const faviconUrl = `${API_URL}/utils/favicon?url=${encodeURIComponent(url)}`;
+    return (
+        <div className="flex items-center gap-3">
+            <Image 
+                src={faviconUrl} 
+                alt={`${brandName} logo`} 
+                width={40} 
+                height={40} 
+                className="rounded-lg border bg-background p-1" 
+                unoptimized // Necessary for external, dynamic URLs
+            />
+            <span className="text-xl font-semibold">{brandName}</span>
+        </div>
+    );
+};
+
+const ReportHeader = ({ report }: { report: Report }) => {
+    // FIX: Use the primary source URL for the logo, with a fallback.
+    const acquirerUrl = report.analysis?.acquirer_sources?.[0]?.url || `https://${report.acquirer_brand}.com`;
+    const targetUrl = report.analysis?.target_sources?.[0]?.url || `https://${report.target_brand}.com`;
+
+    return (
+        <div className="space-y-4">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <CompanyLogo url={acquirerUrl} brandName={report.acquirer_brand} />
+                <Zap className="h-8 w-8 text-muted-foreground flex-shrink-0" />
+                <CompanyLogo url={targetUrl} brandName={report.target_brand} />
+            </div>
+            <Card>
+                <CardHeader>
+                    <CardTitle className="text-3xl">{report.title}</CardTitle>
+                    <CardDescription>Cultural due diligence report generated on {new Date(report.created_at).toLocaleString()}.</CardDescription>
+                </CardHeader>
+            </Card>
+        </div>
+    );
+};
+
+const SeverityBadge = ({ severity }: { severity: ClashSeverity }) => {
+  const config = {
+    HIGH: { text: "High", className: "bg-red-200 text-red-800 border-red-300 dark:bg-red-900/50 dark:text-red-300 dark:border-red-700" },
+    MEDIUM: { text: "Medium", className: "bg-yellow-200 text-yellow-800 border-yellow-300 dark:bg-yellow-900/50 dark:text-yellow-300 dark:border-yellow-700" },
+    LOW: { text: "Low", className: "bg-blue-200 text-blue-800 border-blue-300 dark:bg-blue-900/50 dark:text-blue-300 dark:border-blue-700" },
+  };
+  const { text, className } = config[severity] || config.LOW;
+  return <Badge className={`font-semibold ${className}`}>{text}</Badge>;
+};
+
+const SourcePill = ({ url }: { url: string }) => {
+    try {
+        const domain = new URL(url).hostname.replace('www.', '');
+        const faviconUrl = `https://satori-rho.vercel.app/api/image?url=${url}`;
+        return (
+            <Link href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-full border bg-secondary/50 px-3 py-1 text-sm text-secondary-foreground transition-colors hover:bg-secondary">
+                <Image src={faviconUrl} alt={`${domain} favicon`} width={16} height={16} className="rounded-full" />
+                {domain}
+            </Link>
+        )
+    } catch (error) {
+        return <Link href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-full border bg-secondary/50 px-3 py-1 text-sm text-secondary-foreground transition-colors hover:bg-secondary"><LinkIcon className="h-4 w-4" />{url}</Link>
+    }
+}
+
+export const ReportView = ({ report }: ReportViewProps) => {
+    const analysis = report.analysis;
+    const archetypes = analysis ? JSON.parse(analysis.brand_archetype_summary) : {};
+
+    return (
+        <ResizablePanelGroup direction="horizontal" className="h-[calc(100vh-8rem)] w-full rounded-lg border">
+            <ResizablePanel defaultSize={65}>
+                <ScrollArea className="h-full p-4 md:p-6">
+                <div className="space-y-6">
+                    <ReportHeader report={report} />
+                    
+                    <div className="grid md:grid-cols-3 gap-6">
+                        <div className="md:col-span-2 space-y-6">
+                            <Card>
+                                <CardHeader><CardTitle className="flex items-center gap-2"><Zap className="h-5 w-5 text-primary" />Strategic Summary</CardTitle></CardHeader>
+                                <CardContent><p className="text-muted-foreground whitespace-pre-wrap">{analysis?.strategic_summary}</p></CardContent>
+                            </Card>
+                            <Card>
+                                <CardHeader><CardTitle className="flex items-center gap-2"><TrendingUp className="h-5 w-5 text-green-500" />Untapped Growth Opportunities</CardTitle><CardDescription>Shared affinities that represent strategic pillars for post-acquisition integration.</CardDescription></CardHeader>
+                                <CardContent>
+                                    <Table><TableHeader><TableRow><TableHead>Opportunity</TableHead><TableHead className="text-right">Impact</TableHead></TableRow></TableHeader><TableBody>{report.untapped_growths.map((g) => (<TableRow key={g.id}><TableCell className="font-medium whitespace-normal">{g.description}</TableCell><TableCell className="text-right font-bold text-green-600 dark:text-green-400">{g.potential_impact_score}/10</TableCell></TableRow>))}</TableBody></Table>
+                                </CardContent>
+                            </Card>
+                            <Card>
+                                <CardHeader><CardTitle className="flex items-center gap-2"><AlertTriangle className="h-5 w-5 text-red-500" />Potential Culture Clashes</CardTitle><CardDescription>Divergent audience tastes that could pose integration risks.</CardDescription></CardHeader>
+                                <CardContent>
+                                    <Table><TableHeader><TableRow><TableHead>Clash Topic</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Severity</TableHead></TableRow></TableHeader><TableBody>{report.culture_clashes.map((c) => (<TableRow key={c.id}><TableCell className="font-semibold">{c.topic}</TableCell><TableCell className="text-muted-foreground whitespace-normal">{c.description}</TableCell><TableCell className="text-right"><SeverityBadge severity={c.severity} /></TableCell></TableRow>))}</TableBody></Table>
+                                </CardContent>
+                            </Card>
+                        </div>
+                        <div className="md:col-span-1 space-y-6">
+                            <Card>
+                                <CardHeader><CardTitle>Compatibility Score</CardTitle><CardDescription>Alignment based on audience taste data.</CardDescription></CardHeader>
+                                <CardContent className="flex flex-col items-center justify-center"><div className="text-7xl font-bold text-primary">{analysis?.cultural_compatibility_score}</div><p className="text-muted-foreground mt-1">out of 100</p></CardContent>
+                            </Card>
+                             {analysis?.search_sources && analysis.search_sources.length > 0 && (
+                                <Card>
+                                    <CardHeader><CardTitle className="flex items-center gap-2"><Globe className="h-5 w-5 text-blue-500" />Grounding Sources</CardTitle><CardDescription>Web sources used for analysis.</CardDescription></CardHeader>
+                                    <CardContent className="flex flex-wrap gap-2">
+                                        {analysis.search_sources.map(source => <SourcePill key={source.url} url={source.url} />)}
+                                    </CardContent>
+                                </Card>
+                             )}
+                            <Card>
+                                <CardHeader><CardTitle>Brand Archetypes</CardTitle><CardDescription>AI-generated personalities based on affinities.</CardDescription></CardHeader>
+                                <CardContent className="space-y-4">
+                                    <div><h3 className="font-semibold text-foreground flex items-center gap-2"><Users className="h-4 w-4" />{report.acquirer_brand}</h3><p className="text-muted-foreground text-sm whitespace-pre-wrap">{archetypes.acquirer_archetype}</p></div>
+                                    <Separator />
+                                    <div><h3 className="font-semibold text-foreground flex items-center gap-2"><Target className="h-4 w-4" />{report.target_brand}</h3><p className="text-muted-foreground text-sm whitespace-pre-wrap">{archetypes.target_archetype}</p></div>
+                                </CardContent>
+                            </Card>
+                        </div>
+                    </div>
+                </div>
+                </ScrollArea>
+            </ResizablePanel>
+            <ResizableHandle withHandle />
+            <ResizablePanel defaultSize={35} minSize={25}>
+                <AIAnalystChat report={report} />
+            </ResizablePanel>
+        </ResizablePanelGroup>
+    );
+};
+
+export const ReportViewSkeleton = () => {
+  return (
+    <div className="container mx-auto py-6 space-y-6 animate-pulse">
+      <Skeleton className="h-24 w-full" />
+      <div className="grid md:grid-cols-3 gap-6">
+        <div className="md:col-span-2 space-y-6">
+          <Skeleton className="h-32 w-full" />
+          <Skeleton className="h-48 w-full" />
+          <Skeleton className="h-48 w-full" />
+        </div>
+        <div className="md:col-span-1 space-y-6">
+          <Skeleton className="h-32 w-full" />
+          <Skeleton className="h-48 w-full" />
+        </div>
+      </div>
+    </div>
+  );
+};-e 
+-e
+
+File: web/src/components/report/ChatCreator.tsx
+"use client";
+
+import React, { useState, useRef, useEffect, FormEvent } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { toast } from 'sonner';
+import useSWRMutation from 'swr/mutation';
+import { useAuth } from '@/components/global/providers';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card';
+import { Input } from '../ui/input';
+import { Button } from '../ui/button';
+import { Label } from '../ui/label';
+import { Switch } from '../ui/switch';
+import { Textarea } from '../ui/textarea';
+import { ArrowUp, Plus, Bot, User } from 'lucide-react';
+import { ScrollArea } from '../ui/scroll-area';
+import { cn } from '@/lib/utils';
+
+interface Message {
+  id: number;
+  text: string;
+  sender: 'bot' | 'user';
+  component?: React.ReactNode;
+}
+
+interface ChatCreatorProps {
+    onReportCreated: () => void;
+}
+
+const createReport = async (url: string, { arg }: { arg: any }) => {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${arg.token}` },
+    body: JSON.stringify(arg.data)
+  });
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(errorData.detail || 'Failed to create report.');
+  }
+  return response.json();
+}
+
+export const ChatCreator = ({ onReportCreated }: ChatCreatorProps) => {
+  const { accessToken } = useAuth();
+  const API_URL = process.env.NEXT_PUBLIC_API_URL;
+  const { trigger: triggerCreate, isMutating: isCreating } = useSWRMutation(`${API_URL}/reports/`, createReport);
+
+  const [messages, setMessages] = useState<Message[]>([
+    { id: 1, text: "Welcome to Alloy. Let's de-risk your next acquisition. Who is the **acquiring** company?", sender: 'bot' }
+  ]);
+  const [inputValue, setInputValue] = useState('');
+  const [stage, setStage] = useState<'acquirer' | 'target' | 'context' | 'ready'>('acquirer');
+  const [acquirer, setAcquirer] = useState('');
+  const [target, setTarget] = useState('');
+  const [context, setContext] = useState('');
+  const [useGrounding, setUseGrounding] = useState(false);
+  const [showContext, setShowContext] = useState(false);
+
+  const scrollAreaRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (scrollAreaRef.current) {
+      scrollAreaRef.current.scrollTo({ top: scrollAreaRef.current.scrollHeight, behavior: 'smooth' });
+    }
+  }, [messages]);
+
+  const addMessage = (text: string, sender: 'bot' | 'user', component?: React.ReactNode) => {
+    const newMessage: Message = { id: Date.now(), text, sender, component };
+    setMessages(prev => [...prev, newMessage]);
+  };
+
+  const handleSendMessage = (e: FormEvent) => {
+    e.preventDefault();
+    if (!inputValue.trim() || isCreating) return;
+
+    addMessage(inputValue, 'user');
+
+    switch (stage) {
+      case 'acquirer':
+        setAcquirer(inputValue);
+        setStage('target');
+        addMessage(`Great. And who is the **target** company?`, 'bot');
+        break;
+      case 'target':
+        setTarget(inputValue);
+        setStage('ready');
+        addMessage(`Perfect. We're ready to analyze the cultural compatibility between **${acquirer}** (Acquirer) and **${inputValue}** (Target).`, 'bot', 
+          <div className="mt-4 p-4 border rounded-lg bg-background/50 space-y-4">
+              <div className="flex items-center justify-between">
+                <Label htmlFor="grounding-switch" className="flex flex-col space-y-1">
+                  <span>Enable Internet Grounding</span>
+                  <span className="font-normal leading-snug text-muted-foreground text-xs">
+                    Allow AI to use its knowledge to enrich analysis.
+                  </span>
+                </Label>
+                <Switch id="grounding-switch" checked={useGrounding} onCheckedChange={setUseGrounding} />
+              </div>
+               <Button variant="ghost" size="sm" className="w-full justify-start" onClick={() => setShowContext(true)}>
+                    <Plus className="mr-2 h-4 w-4" /> Add Supplementary Context
+                </Button>
+              {showContext && (
+                <Textarea 
+                    placeholder="Paste any relevant articles, memos, or data here..." 
+                    value={context}
+                    onChange={e => setContext(e.target.value)}
+                    className="min-h-[100px]"
+                />
+              )}
+          </div>
+        );
+        break;
+    }
+    setInputValue('');
+  };
+
+  const handleGenerateReport = async () => {
+    if (!acquirer || !target || isCreating) return;
+
+    let toastId = toast.loading("Kicking off analysis...", { description: "This may take a minute." });
+    setTimeout(() => toast.loading("Analyzing taste profiles...", { id: toastId }), 2000);
+    setTimeout(() => toast.loading("Synthesizing strategic insights...", { id: toastId }), 5000);
+
+    try {
+      await triggerCreate({
+        token: accessToken!,
+        data: {
+          acquirer_brand: acquirer,
+          target_brand: target,
+          title: `${acquirer} vs. ${target}`,
+          context: context || null,
+          use_grounding: useGrounding
+        }
+      });
+      toast.success("Report generated successfully!", { id: toastId });
+      onReportCreated();
+      // Reset state for next report
+      setMessages([{ id: 1, text: "Welcome back. Let's analyze another deal. Who is the acquiring company?", sender: 'bot' }]);
+      setStage('acquirer');
+      setAcquirer('');
+      setTarget('');
+      setContext('');
+      setUseGrounding(false);
+      setShowContext(false);
+    } catch (err: any) {
+      toast.error("Report Generation Failed", { id: toastId, description: err.message });
+    }
+  };
+
+  return (
+    <Card className="lg:col-span-1 flex flex-col h-[500px] md:h-auto">
+      <CardHeader>
+        <CardTitle>Create New Alloy Report</CardTitle>
+        <CardDescription>Use the chat to start your cultural analysis.</CardDescription>
+      </CardHeader>
+      <CardContent className="flex-grow flex flex-col gap-4 overflow-hidden">
+        <ScrollArea className="flex-grow pr-4 -mr-4" ref={scrollAreaRef}>
+            <div className="space-y-6">
+            <AnimatePresence>
+              {messages.map((message) => (
+                <motion.div
+                  key={message.id}
+                  layout
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.3 }}
+                  className={cn(
+                    "flex items-start gap-3",
+                    message.sender === 'user' ? 'justify-end' : 'justify-start'
+                  )}
+                >
+                  {message.sender === 'bot' && (
+                    <div className="bg-muted rounded-full p-2">
+                      <Bot className="h-4 w-4" />
+                    </div>
+                  )}
+                  <div className={cn(
+                    "max-w-xs md:max-w-sm rounded-lg px-4 py-2 text-sm",
+                    message.sender === 'bot' 
+                      ? 'bg-muted rounded-bl-none' 
+                      : 'bg-primary text-primary-foreground rounded-br-none'
+                  )}>
+                    <p dangerouslySetInnerHTML={{ __html: message.text }}></p>
+                    {message.component}
+                  </div>
+                   {message.sender === 'user' && (
+                    <div className="bg-primary/20 rounded-full p-2">
+                      <User className="h-4 w-4" />
+                    </div>
+                  )}
+                </motion.div>
+              ))}
+            </AnimatePresence>
+            </div>
+        </ScrollArea>
+        
+        {stage === 'ready' ? (
+            <Button onClick={handleGenerateReport} disabled={isCreating} className="w-full">
+              {isCreating ? 'Analyzing...' : 'Generate Report'}
+            </Button>
+        ) : (
+            <form onSubmit={handleSendMessage} className="flex items-center gap-2">
+                <Input
+                    id="chat-input"
+                    placeholder={
+                        stage === 'acquirer' ? "e.g., Disney" :
+                        stage === 'target' ? "e.g., A24 Films" :
+                        "Enter your message..."
+                    }
+                    value={inputValue}
+                    onChange={(e) => setInputValue(e.target.value)}
+                    autoComplete="off"
+                    disabled={isCreating}
+                />
+                <Button type="submit" size="icon" disabled={!inputValue.trim() || isCreating}>
+                    <ArrowUp className="h-4 w-4" />
+                </Button>
+            </form>
+        )}
+      </CardContent>
+    </Card>
+  );
+};-e 
+-e
+
 File: web/src/components/global/Hero.tsx
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Link from 'next/link';
 import Logo from './Logo';
+import { BarChart, AlertTriangle, Zap, BrainCircuit, ShieldCheck, Code2 } from 'lucide-react';
+import { LinesPatternCard, LinesPatternCardBody } from './LinesPatternCard';
+
 
 // Helper component for glowing feature tags
 interface FeatureItemProps {
@@ -7331,6 +8560,77 @@ const Lightning: React.FC<LightningProps> = ({
   return <canvas ref={canvasRef} className="w-full h-full relative" />;
 };
 
+const featureList = [
+  {
+    icon: BarChart,
+    title: 'Data-Driven Compatibility Score',
+    description: 'Go beyond financials. Our core metric quantifies cultural alignment by analyzing millions of taste-based data points from Qloo\'s AI.',
+  },
+  {
+    icon: AlertTriangle,
+    title: 'Culture Clash Identification',
+    description: 'Proactively identify potential integration risks. We highlight areas of stark cultural divergence between brand audiences before they become post-merger problems.',
+  },
+  {
+    icon: Zap,
+    title: 'Untapped Growth Discovery',
+    description: 'Uncover hidden synergies. Alloy pinpoints shared cultural passions, revealing immediate opportunities for joint marketing, product bundling, and cross-promotion.',
+  },
+  {
+    icon: BrainCircuit,
+    title: 'AI-Powered Brand Archetyping',
+    description: 'Understand the "why" behind the data. Gemini generates a deep, qualitative summary of each brand\'s persona and values based on their cultural DNA.',
+  },
+  {
+    icon: ShieldCheck,
+    title: 'Secure & Confidential Analysis',
+    description: 'Your strategic analysis is sensitive. Our platform ensures end-to-end security, with robust authentication and data handling for peace of mind.',
+  },
+  {
+    icon: Code2,
+    title: 'API-First for Seamless Integration',
+    description: 'Built for power users. Integrate Alloy\'s cultural intelligence directly into your existing M&A workflows and proprietary models with our robust API.',
+  },
+];
+
+
+export const FeaturesSection = () => (
+  <section className="bg-black py-20 sm:py-32">
+    <div className="mx-auto max-w-7xl px-6 lg:px-8">
+      <div className="mx-auto max-w-2xl lg:text-center">
+        <h2 className="text-base font-semibold leading-7 text-blue-400">The Alloy Advantage</h2>
+        <p className="mt-2 text-3xl font-bold tracking-tight text-white sm:text-4xl">
+          De-Risk Deals with Precision Intelligence
+        </p>
+        <p className="mt-6 text-lg leading-8 text-gray-300">
+          Alloy provides a multi-faceted view of cultural compatibility, transforming a traditionally qualitative and high-risk variable into a quantifiable asset.
+        </p>
+      </div>
+      <div className="mx-auto mt-16 max-w-2xl sm:mt-20 lg:mt-24 lg:max-w-none">
+        <dl className="grid max-w-xl grid-cols-1 gap-8 lg:max-w-none lg:grid-cols-3">
+          {featureList.map((feature) => (
+            <LinesPatternCard 
+              key={feature.title} 
+              className="flex flex-col bg-neutral-950 border-white/10"
+              gradientClassName="from-neutral-950/90 via-neutral-950/40 to-neutral-950/10"
+            >
+              <LinesPatternCardBody>
+                <dt className="flex items-center gap-x-3 text-base font-semibold leading-7 text-white">
+                  <feature.icon className="h-5 w-5 flex-none text-blue-400" aria-hidden="true" />
+                  {feature.title}
+                </dt>
+                <dd className="mt-4 flex flex-auto flex-col text-base leading-7 text-gray-300">
+                  <p className="flex-auto">{feature.description}</p>
+                </dd>
+              </LinesPatternCardBody>
+            </LinesPatternCard>
+          ))}
+        </dl>
+      </div>
+    </div>
+  </section>
+);
+
 
 // The main Alloy Hero Component
 export const AlloyHeroSection: React.FC = () => {
@@ -7502,6 +8802,102 @@ export const AlloyHeroSection: React.FC = () => {
 };-e 
 -e
 
+File: web/src/components/global/LinesPatternCard.tsx
+import { cn } from '@/lib/utils'
+import { motion } from "framer-motion"
+
+interface LinesPatternCardProps {
+  children: React.ReactNode
+  className?: string
+  patternClassName?: string
+  gradientClassName?: string
+}
+
+export function LinesPatternCard({ 
+  children, 
+  className,
+  patternClassName,
+  gradientClassName
+}: LinesPatternCardProps) {
+  return (
+    <motion.div
+      className={cn(
+        "border w-full rounded-md overflow-hidden",
+        "bg-background",
+        "border-border",
+        "p-3",
+        className
+      )}
+      initial={{ opacity: 0, y: -20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.8, ease: "easeOut" }}
+    >
+      <div className={cn(
+        "size-full bg-repeat bg-[length:30px_30px]",
+        "bg-lines-pattern-light dark:bg-lines-pattern",
+        patternClassName
+      )}>
+        <div className={cn(
+          "size-full bg-gradient-to-tr",
+          "from-background/90 via-background/40 to-background/10",
+          gradientClassName
+        )}>
+          {children}
+        </div>
+      </div>
+    </motion.div>
+  )
+}
+
+export function LinesPatternCardBody({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
+  return (
+    <div 
+      className={cn("text-left p-4 md:p-6", className)} 
+      {...props} 
+    />
+  )
+}-e 
+-e
+
+File: web/src/components/global/DashboardGreeting.tsx
+"use client";
+
+import { motion } from "framer-motion";
+import { cn } from "@/lib/utils";
+
+interface DashboardGreetingProps {
+  isVisible: boolean;
+}
+
+const greetings = [
+    { title: "Let's de-risk your next deal.", subtitle: "Enter the acquirer and target to begin your cultural analysis." },
+    { title: "Ready for analysis?", subtitle: "Quantify the cultural fit for your next M&A." },
+];
+
+// A simple hash function to pick a greeting based on the day
+const getDailyGreeting = () => {
+    const day = new Date().getDate();
+    return greetings[day % greetings.length];
+};
+
+export const DashboardGreeting = ({ isVisible }: DashboardGreetingProps) => {
+  const greeting = getDailyGreeting();
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -10 }}
+      animate={{ opacity: isVisible ? 1 : 0, y: isVisible ? 0 : -10 }}
+      transition={{ duration: 0.5, ease: "easeInOut" }}
+      className={cn("text-center mb-8", !isVisible && "pointer-events-none")}
+    >
+      <h1 className="text-3xl md:text-4xl font-semibold text-foreground tracking-tight">{greeting.title}</h1>
+      <p className="mt-2 text-base text-muted-foreground">{greeting.subtitle}</p>
+    </motion.div>
+  );
+};
+-e 
+-e
+
 File: web/src/components/global/CommandPalette.tsx
 "use client";
 
@@ -7626,9 +9022,320 @@ export const DynamicBreadcrumb = () => {
 };-e 
 -e
 
+File: web/src/components/global/PromptInputBox.tsx
+"use client";
+
+import React, { useState, useRef, useEffect } from "react";
+import * as TooltipPrimitive from "@radix-ui/react-tooltip";
+import { ArrowUp, Paperclip, X, FileText, Search, Bot, ChevronsRight, Database, BrainCircuit, CheckCircle, AlertTriangle, Link as LinkIcon, Sparkles, Loader2 } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { Button } from "../ui/button";
+import { Input } from "../ui/input";
+import { Textarea } from "../ui/textarea";
+import { toast } from "sonner";
+import { useAuth } from "./providers";
+import useSWRMutation from 'swr/mutation';
+import { motion, AnimatePresence } from "framer-motion";
+import { ScrollArea } from "../ui/scroll-area";
+import { Switch } from "../ui/switch";
+import { Label } from "../ui/label";
+import Image from "next/image";
+import Link from "next/link";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../ui/collapsible";
+
+// API MUTATION
+const createDraftReport = async (url: string, { arg }: { arg: { token: string }}) => {
+    const res = await fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${arg.token}` } });
+    if (!res.ok) throw new Error('Failed to create draft session.');
+    return res.json();
+}
+
+// TYPES
+interface Step {
+  id: string;
+  status: 'info' | 'search' | 'source' | 'qloo' | 'synthesis' | 'saving' | 'complete' | 'error';
+  message?: string;
+  payload?: any;
+}
+
+interface UploadedFileStatus {
+    name: string;
+    status: 'uploading' | 'success' | 'error';
+    message?: string;
+}
+
+interface PromptInputBoxProps {
+  onReportCreated: () => void;
+  onPristineChange: (isPristine: boolean) => void;
+  className?: string;
+}
+
+// TOOLTIP
+const TooltipProvider = TooltipPrimitive.Provider;
+const Tooltip = TooltipPrimitive.Root;
+const TooltipTrigger = TooltipPrimitive.Trigger;
+const TooltipContent = React.forwardRef<React.ElementRef<typeof TooltipPrimitive.Content>, React.ComponentPropsWithoutRef<typeof TooltipPrimitive.Content>>(({ className, sideOffset = 4, ...props }, ref) => (
+  <TooltipPrimitive.Content ref={ref} sideOffset={sideOffset} className={cn("z-50 overflow-hidden rounded-md border border-border bg-popover px-3 py-1.5 text-sm text-popover-foreground shadow-md animate-in fade-in-0", className)} {...props} />
+));
+TooltipContent.displayName = TooltipPrimitive.Content.displayName;
+
+// FAVICON
+const Favicon = ({ url, ...props }: { url: string } & Partial<React.ComponentProps<typeof Image>>) => {
+    const API_URL = process.env.NEXT_PUBLIC_API_URL;
+    const faviconUrl = `${API_URL}/utils/favicon?url=${encodeURIComponent(url)}`;
+    return (
+        <Image 
+            src={faviconUrl} 
+            alt="favicon" 
+            width={16} 
+            height={16} 
+            className="rounded-full"
+            unoptimized 
+            {...props}
+        />
+    );
+};
+
+// STEP ITEM COMPONENT
+const StepItem = ({ step }: { step: Step }) => {
+    const ICONS = {
+        info: <Bot className="h-4 w-4 text-primary" />,
+        search: <Search className="h-4 w-4 text-blue-500" />,
+        source: <LinkIcon className="h-4 w-4 text-muted-foreground" />,
+        qloo: <ChevronsRight className="h-4 w-4 text-purple-500" />,
+        synthesis: <BrainCircuit className="h-4 w-4 text-amber-500" />,
+        saving: <Database className="h-4 w-4 text-green-500" />,
+        complete: <CheckCircle className="h-4 w-4 text-green-500" />,
+        error: <AlertTriangle className="h-4 w-4 text-destructive" />
+    };
+
+    const renderContent = () => {
+        if (step.status === 'source' && step.payload) {
+            return (
+                <Link href={step.payload.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 group">
+                    <Favicon url={step.payload.url} />
+                    <span className="truncate group-hover:underline">{step.payload.title || step.payload.url}</span>
+                </Link>
+            );
+        }
+        return step.message;
+    };
+
+    return (
+        <motion.div layout initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.3 }} className="flex items-start gap-3 text-sm">
+            <div className="flex-shrink-0 mt-0.5">{ICONS[step.status] || <Sparkles className="h-4 w-4" />}</div>
+            <div className={cn("flex-grow", step.status === 'error' && "text-destructive font-medium")}>{renderContent()}</div>
+        </motion.div>
+    );
+};
+
+// MAIN COMPONENT
+export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxProps>(
+  ({ onReportCreated, onPristineChange, className }, ref) => {
+    const { accessToken } = useAuth();
+    const API_URL = process.env.NEXT_PUBLIC_API_URL;
+
+    // Input state
+    const [draftReportId, setDraftReportId] = useState<number | null>(null);
+    const [acquirer, setAcquirer] = useState("");
+    const [target, setTarget] = useState("");
+    const [notes, setNotes] = useState("");
+    const [uploadedFile, setUploadedFile] = useState<UploadedFileStatus | null>(null);
+    const [useGrounding, setUseGrounding] = useState(false);
+    
+    // Generation state
+    const [logSteps, setLogSteps] = useState<Step[]>([]);
+    const [sources, setSources] = useState<Step[]>([]);
+    const [allSourcesStreamed, setAllSourcesStreamed] = useState(false);
+    const [isGenerating, setIsGenerating] = useState(false);
+    const [isCollapsibleOpen, setIsCollapsibleOpen] = useState(true);
+
+    const fileInputRef = useRef<HTMLInputElement>(null);
+    const scrollAreaRef = useRef<HTMLDivElement>(null);
+
+    const { trigger: triggerDraft, isMutating: isCreatingDraft } = useSWRMutation(`${API_URL}/reports/draft`, createDraftReport);
+    const isLoading = isCreatingDraft || isGenerating || uploadedFile?.status === 'uploading';
+
+    useEffect(() => {
+        if (accessToken && !draftReportId && !isGenerating) {
+            triggerDraft({ token: accessToken })
+                .then(data => setDraftReportId(data.id))
+                .catch(() => toast.error("Could not start a new session.", { description: "Please refresh the page." }));
+        }
+    }, [accessToken, draftReportId, triggerDraft, isGenerating]);
+    
+    useEffect(() => { onPristineChange(!acquirer && !target && !notes && !uploadedFile); }, [acquirer, target, notes, uploadedFile, onPristineChange]);
+    useEffect(() => { if (scrollAreaRef.current) scrollAreaRef.current.scrollTo({ top: scrollAreaRef.current.scrollHeight, behavior: 'smooth' }); }, [logSteps, sources]);
+
+    const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file || !draftReportId) return;
+
+        setUploadedFile({ name: file.name, status: 'uploading' });
+
+        const formData = new FormData();
+        formData.append('file', file);
+
+        try {
+            const response = await fetch(`${API_URL}/reports/${draftReportId}/upload_context_file`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${accessToken!}` },
+                body: formData,
+            });
+
+            const result = await response.json();
+            if (!response.ok) { throw new Error(result.detail || 'File upload failed'); }
+
+            setUploadedFile({ name: file.name, status: 'success', message: 'Context uploaded' });
+            toast.success("Context file uploaded successfully.");
+
+        } catch (error: any) {
+            setUploadedFile({ name: file.name, status: 'error', message: error.message });
+            toast.error("File Upload Failed", { description: error.message });
+        }
+    };
+
+    const handleSubmit = async () => {
+        if (isLoading || !draftReportId || acquirer.trim().length < 2 || target.trim().length < 2) {
+             toast.error("Invalid Input", { description: "Please provide full, official brand names."});
+            return;
+        }
+        setIsGenerating(true);
+        setLogSteps([]);
+        setSources([]);
+        setAllSourcesStreamed(false);
+        setIsCollapsibleOpen(true);
+        
+        try {
+            const response = await fetch(`${API_URL}/reports/${draftReportId}/generate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken!}` },
+                body: JSON.stringify({ acquirer_brand: acquirer, target_brand: target, title: `${acquirer} vs. ${target}`, context: notes, use_grounding: useGrounding })
+            });
+
+            if (!response.ok || !response.body) { throw new Error(response.statusText || "Server response was invalid."); }
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let accumulatedChunks = "";
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                accumulatedChunks += decoder.decode(value, { stream: true });
+                const lines = accumulatedChunks.split('\n\n');
+                accumulatedChunks = lines.pop() || "";
+
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        const jsonData = JSON.parse(line.substring(6));
+                        const newStep: Step = { id: `step-${Date.now()}-${Math.random()}`, ...jsonData };
+                        if (newStep.status === 'source') setSources(prev => [...prev, newStep]);
+                        else {
+                            setLogSteps(prev => [...prev, newStep]);
+                            if (newStep.status !== 'search' && !allSourcesStreamed) { setAllSourcesStreamed(true); setIsCollapsibleOpen(false); }
+                        }
+                        if (newStep.status === 'complete') {
+                            toast.success("Report generated successfully!");
+                            onReportCreated();
+                            setTimeout(() => setIsGenerating(false), 1000);
+                            return;
+                        }
+                        if (newStep.status === 'error') {
+                            toast.error("Generation Failed", { description: newStep.message });
+                            setIsGenerating(false); return;
+                        }
+                    }
+                }
+            }
+        } catch (err: any) { toast.error("An error occurred", { description: err.message }); setIsGenerating(false); }
+    };
+    
+    const handleReset = () => {
+        setIsGenerating(false);
+        setLogSteps([]);
+        setSources([]);
+        setAllSourcesStreamed(false);
+        setAcquirer("");
+        setTarget("");
+        setNotes("");
+        setUploadedFile(null);
+        setDraftReportId(null);
+    }
+
+    const canSubmit = acquirer.trim().length > 1 && target.trim().length > 1 && uploadedFile?.status !== 'uploading';
+
+    if (isGenerating) {
+        return <div ref={ref} className={cn("w-full max-w-3xl mx-auto", className)}>
+            <motion.div layout className="relative w-full rounded-2xl border border-border bg-card shadow-xl transition-all">
+                <div className="p-4"><h3 className="font-semibold text-center text-foreground">Generating Report...</h3><p className="text-center text-sm text-muted-foreground">{acquirer} vs. {target}</p></div>
+                <ScrollArea className="h-64 px-4" ref={scrollAreaRef}>
+                    <div className="space-y-3 py-4">
+                        <AnimatePresence>{logSteps.map((step) => <StepItem key={step.id} step={step} />)}</AnimatePresence>
+                        {sources.length > 0 && <Collapsible open={isCollapsibleOpen} onOpenChange={setIsCollapsibleOpen}>
+                            <CollapsibleTrigger className="w-full p-2 rounded-md hover:bg-muted/50 text-left">
+                                <div className="flex items-center justify-between"><div className="flex items-center gap-2 overflow-hidden"><span className="text-sm font-medium">Found {sources.length} sources</span><div className="flex items-center gap-1.5 flex-shrink min-w-0">{sources.map(source => <motion.div key={source.id} layout><Favicon url={source.payload.url}/></motion.div>)}</div></div><span className="text-xs text-muted-foreground">{isCollapsibleOpen ? 'Collapse' : 'Expand'}</span></div>
+                            </CollapsibleTrigger>
+                            <CollapsibleContent className="space-y-3 pt-2">{sources.map(source => <StepItem key={source.id} step={source} />)}</CollapsibleContent>
+                        </Collapsible>}
+                    </div>
+                </ScrollArea>
+                <div className="flex items-center justify-end p-2 border-t border-border"><Button onClick={handleReset} disabled={isGenerating}>Create New Report</Button></div>
+            </motion.div>
+        </div>
+    }
+
+    return (
+        <div ref={ref} className={cn("w-full max-w-3xl mx-auto", className)}>
+            <motion.div layout className="relative w-full rounded-2xl border border-border bg-card shadow-xl transition-all">
+              <div className="p-4 space-y-3">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <Input placeholder="Acquirer (e.g., The Walt Disney Company)" value={acquirer} onChange={(e) => setAcquirer(e.target.value)} className="h-10 bg-background" disabled={isLoading} />
+                  <Input placeholder="Target (e.g., A24 Films)" value={target} onChange={(e) => setTarget(e.target.value)} className="h-10 bg-background" disabled={isLoading} />
+                </div>
+                <Textarea placeholder="Add optional notes or a specific query for the AI..." value={notes} onChange={(e) => setNotes(e.target.value)} className="bg-background min-h-[40px] max-h-48" rows={1} disabled={isLoading} />
+                 {uploadedFile && <motion.div layout initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex items-center justify-between rounded-lg bg-background p-2">
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                        {uploadedFile.status === 'uploading' && <Loader2 className="h-4 w-4 animate-spin" />}
+                        {uploadedFile.status === 'success' && <CheckCircle className="h-4 w-4 text-green-500" />}
+                        {uploadedFile.status === 'error' && <AlertTriangle className="h-4 w-4 text-destructive" />}
+                        <span className="truncate">{uploadedFile.name}</span>
+                    </div>
+                    <Button variant="ghost" size="icon" className="h-6 w-6 rounded-full" onClick={() => setUploadedFile(null)}><X className="h-4 w-4" /></Button>
+                </motion.div>}
+              </div>
+              <div className="flex items-center justify-between p-2 border-t border-border">
+                <div className="flex items-center gap-1">
+                    <TooltipProvider delayDuration={100}>
+                        <Tooltip>
+                            <TooltipTrigger asChild><Button size="icon" variant="ghost" className="h-8 w-8 text-muted-foreground" onClick={() => fileInputRef.current?.click()} disabled={isLoading}><Paperclip className="h-4 w-4" /></Button></TooltipTrigger>
+                            <TooltipContent side="top">Attach Context (.pdf, .xlsx, .txt, .md)</TooltipContent>
+                        </Tooltip>
+                         <Tooltip>
+                            <TooltipTrigger asChild><div className="flex items-center space-x-2 p-2"><Switch id="grounding-switch" checked={useGrounding} onCheckedChange={setUseGrounding} disabled={isLoading} /><Label htmlFor="grounding-switch" className="text-xs text-muted-foreground">Grounding</Label></div></TooltipTrigger>
+                            <TooltipContent side="top">Use live web search to enrich analysis</TooltipContent>
+                        </Tooltip>
+                    </TooltipProvider>
+                    <input type="file" ref={fileInputRef} onChange={handleFileChange} accept=".pdf,.xlsx,.xls,.txt,.md" className="hidden" disabled={!draftReportId || !!uploadedFile}/>
+                </div>
+                <Button onClick={handleSubmit} disabled={isLoading || !canSubmit}>
+                    {isLoading ? "Processing..." : "Generate Report"}
+                    <ArrowUp className="ml-2 h-4 w-4" />
+                </Button>
+              </div>
+            </motion.div>
+            <p className="text-center text-xs text-muted-foreground mt-3 px-4">
+                Please use full, official brand names for best results. Data provided by Tavily and Qloo, the AI for culture and taste.
+            </p>
+        </div>
+    );
+});
+PromptInputBox.displayName = "PromptInputBox";-e 
+-e
+
 File: web/src/components/global/Footer.tsx
 "use client";
 import React, { useEffect, useRef, useState } from "react";
+import Logo from "./Logo";
 
 interface LinkItem {
   href: string;
@@ -7737,17 +9444,10 @@ const Footer: React.FC<FooterProps> = ({
             <p className="text-sm text-gray-300">{solutionStatement}</p>
           </div>
           <div className="mt-4">
-            <p className="text-sm flex items-center gap-x-1.5">
-              <svg className="size-3" viewBox="0 0 80 80">
-                <path
-                  fillRule="evenodd"
-                  clipRule="evenodd"
-                  fill="currentColor"
-                  d="M67.4307 11.5693C52.005 -3.85643 26.995 -3.85643 11.5693 11.5693C-3.85643 26.995 -3.85643 52.005 11.5693 67.4307C26.995 82.8564 52.005 82.8564 67.4307 67.4307C82.8564 52.005 82.8564 26.995 67.4307 11.5693ZM17.9332 17.9332C29.8442 6.02225 49.1558 6.02225 61.0668 17.9332C72.9777 29.8442 72.9777 49.1558 61.0668 61.0668C59.7316 62.4019 58.3035 63.5874 56.8032 64.6232L56.8241 64.6023C46.8657 54.6439 46.8657 38.4982 56.8241 28.5398L58.2383 27.1256L51.8744 20.7617L50.4602 22.1759C40.5018 32.1343 24.3561 32.1343 14.3977 22.1759L14.3768 22.1968C15.4126 20.6965 16.5981 19.2684 17.9332 17.9332ZM34.0282 38.6078C25.6372 38.9948 17.1318 36.3344 10.3131 30.6265C7.56889 39.6809 9.12599 49.76 14.9844 57.6517L34.0282 38.6078ZM21.3483 64.0156C29.24 69.874 39.3191 71.4311 48.3735 68.6869C42.6656 61.8682 40.0052 53.3628 40.3922 44.9718L21.3483 64.0156Z"
-                />
-              </svg>
+            <div className="text-sm flex items-center gap-x-1.5">
+              <Logo />
               {copyrightText}
-            </p>
+            </div>
           </div>
         </div>
         {/* Right Side */}
@@ -7866,9 +9566,8 @@ File: web/src/components/global/Header.tsx
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect } from "react";
 import { useTheme } from "next-themes";
-import { toast } from "sonner";
 import {
   Home,
   Users,
@@ -7876,13 +9575,13 @@ import {
   FileText,
   Search,
   PanelLeft,
-  ChevronsUpDown,
   PlusCircle,
   LogOut,
-  User as UserIcon,
   Moon,
   Sun,
-  Laptop
+  Laptop,
+  CreditCard,
+  LifeBuoy
 } from "lucide-react";
 
 import { DynamicBreadcrumb } from "./Breadcrumbs";
@@ -7892,16 +9591,14 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuPortal,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuGroup,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Logo } from "@/components/global/Logo";
@@ -7910,15 +9607,18 @@ import { CommandPalette } from "./CommandPalette";
 
 const mobileNavItems = [
   { href: "/dashboard", icon: Home, label: "Dashboard" },
-  { href: "/dashboard/reports", icon: FileText, label: "Reports" },
+  { href: "/dashboard/reports", icon: FileText, label: "My Reports" },
   { href: "/dashboard/team", icon: Users, label: "Team" },
+  { href: "/dashboard/billing", icon: CreditCard, label: "Billing" },
   { href: "/dashboard/settings", icon: Settings, label: "Settings" },
+  { href: "/dashboard/support", icon: LifeBuoy, label: "Support" },
 ];
 
 export function Header() {
-  const { logout } = useAuth();
+  const { logout, user } = useAuth();
   const { setTheme } = useTheme();
   const [isCommandOpen, setCommandOpen] = useState(false);
+  const pathname = usePathname();
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -7931,103 +9631,118 @@ export function Header() {
     return () => document.removeEventListener("keydown", down);
   }, []);
   
-  const getInitials = (name?: string | null) => name ? name.split(" ").map((n) => n[0]).join("").toUpperCase() : "U";
+  const getInitials = (email?: string) => {
+    return email ? email.charAt(0).toUpperCase() : "A";
+  };
+
+  const displayName = user?.email.split('@')[0] || "User";
 
   return (
     <>
-      <header className="sticky top-0 z-30 flex h-14 items-center gap-4 border-b bg-background px-4 sm:static sm:h-auto sm:border-0 sm:bg-transparent sm:px-6">
-        {/* --- Mobile Nav --- */}
-        <Sheet>
-          <SheetTrigger asChild>
-            <Button size="icon" variant="outline" className="sm:hidden">
-              <PanelLeft className="h-5 w-5" />
-              <span className="sr-only">Toggle Menu</span>
-            </Button>
-          </SheetTrigger>
-          <SheetContent side="left" className="sm:max-w-xs">
-            <nav className="grid gap-6 text-lg font-medium">
-              <Logo />
-              {mobileNavItems.map((item) => (
-                <Link key={item.href} href={item.href} className="flex items-center gap-4 px-2.5 text-muted-foreground hover:text-foreground">
-                  <item.icon className="h-5 w-5" />
-                  {item.label}
-                </Link>
-              ))}
-            </nav>
-          </SheetContent>
-        </Sheet>
-
-        {/* --- Desktop Breadcrumbs --- */}
-        <div className="hidden md:block">
-           <DynamicBreadcrumb />
+      <header className="sticky top-0 z-30 flex h-16 items-center justify-between gap-4 border-b bg-background px-4 sm:px-6">
+        {/* --- Left Side: Mobile Nav Trigger & Breadcrumbs --- */}
+        <div className="flex items-center gap-4">
+            <Sheet>
+            <SheetTrigger asChild>
+                <Button size="icon" variant="outline" className="sm:hidden">
+                <PanelLeft className="h-5 w-5" />
+                <span className="sr-only">Toggle Menu</span>
+                </Button>
+            </SheetTrigger>
+            <SheetContent side="left" className="sm:max-w-xs">
+                <nav className="grid gap-6 text-lg font-medium">
+                <Logo />
+                {mobileNavItems.map((item) => {
+                    const isActive = pathname.startsWith(item.href) && (item.href !== "/dashboard" || pathname === "/dashboard");
+                    return (
+                        <Link
+                            key={item.href}
+                            href={item.href}
+                            className={`flex items-center gap-4 px-2.5 ${isActive ? 'text-foreground' : 'text-muted-foreground'} hover:text-foreground`}
+                        >
+                            <item.icon className="h-5 w-5" />
+                            {item.label}
+                        </Link>
+                    )
+                })}
+                </nav>
+            </SheetContent>
+            </Sheet>
+            <DynamicBreadcrumb />
         </div>
 
-        {/* --- Header Actions (Right Side) --- */}
-        <div className="relative ml-auto flex items-center gap-2 md:grow-0">
-          <Button
-            variant="outline"
-            className="w-full justify-start text-sm text-muted-foreground sm:w-auto sm:pr-12 md:w-40 lg:w-64"
-            onClick={() => setCommandOpen(true)}
-          >
-            <Search className="absolute left-2.5 top-2.5 h-4 w-4" />
-            <span className="ml-6 hidden lg:inline-block">Search...</span>
-             <kbd className="pointer-events-none absolute right-2.5 top-[calc(50%-7px)] hidden h-5 select-none items-center gap-1 rounded border bg-muted px-1.5 font-mono text-[10px] font-medium opacity-100 sm:flex">
-              <span className="text-xs">⌘</span>K
-            </kbd>
-          </Button>
+        {/* --- Right Side: Header Actions --- */}
+        <div className="flex items-center gap-2">
+           <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setCommandOpen(true)}>
+                <Search className="h-4 w-4" />
+                <span className="sr-only">Search</span>
+           </Button>
+           
+           <Button asChild variant="ghost" size="sm" className="h-8 gap-1">
+             <Link href="/dashboard/reports">
+                <FileText className="h-4 w-4" />
+                <span className="hidden sm:inline-block">My Reports</span>
+              </Link>
+           </Button>
 
-          {/* Placeholder for B2B Org Switcher */}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-                <Button variant="outline" className="w-[180px] hidden md:flex">
-                    <span className="truncate">Your Organization</span>
-                    <ChevronsUpDown className="ml-auto h-4 w-4 shrink-0 opacity-50" />
-                </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent className="w-56" align="end">
-                <DropdownMenuLabel>Switch Organization</DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem>Org 1</DropdownMenuItem>
-                <DropdownMenuItem>Org 2</DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={() => toast.info("Create Organization clicked!")}>
-                    <PlusCircle className="mr-2 h-4 w-4" /> Create New
-                </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+           <Button asChild size="sm" className="h-8 gap-1">
+              <Link href="/dashboard">
+                <PlusCircle className="h-3.5 w-3.5" />
+                <span className="sr-only sm:not-sr-only sm:whitespace-nowrap">
+                  New Report
+                </span>
+              </Link>
+            </Button>
 
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" className="relative h-8 w-8 rounded-full">
-                <Avatar className="h-8 w-8">
-                  <AvatarImage src="" alt="User" />
-                  <AvatarFallback>U</AvatarFallback>
+              <Button variant="ghost" className="relative h-9 w-9 rounded-full">
+                <Avatar className="h-9 w-9">
+                  <AvatarImage src="" alt={displayName} />
+                  <AvatarFallback>{getInitials(user?.email)}</AvatarFallback>
                 </Avatar>
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent className="w-56" align="end">
-              <DropdownMenuLabel>My Account</DropdownMenuLabel>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem asChild>
-                <Link href="/dashboard/settings"><Settings className="mr-2 h-4 w-4" />Settings</Link>
-              </DropdownMenuItem>
-              <DropdownMenuItem>
-                <Sun className="mr-2 h-4 w-4" />
-                <span onClick={() => setTheme('light')}>Light Mode</span>
-              </DropdownMenuItem>
-              <DropdownMenuItem>
-                <Moon className="mr-2 h-4 w-4" />
-                <span onClick={() => setTheme('dark')}>Dark Mode</span>
-              </DropdownMenuItem>
-               <DropdownMenuItem>
-                <Laptop className="mr-2 h-4 w-4" />
-                <span onClick={() => setTheme('system')}>System</span>
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={() => logout()}>
-                <LogOut className="mr-2 h-4 w-4" />
-                Logout
-              </DropdownMenuItem>
+            <DropdownMenuContent className="w-64" align="end" forceMount>
+                <DropdownMenuLabel className="font-normal">
+                    <div className="flex flex-col space-y-1">
+                        <p className="text-sm font-medium leading-none capitalize">{displayName}</p>
+                        <p className="text-xs leading-none text-muted-foreground">{user?.email}</p>
+                    </div>
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuGroup>
+                    <DropdownMenuItem asChild><Link href="/dashboard/settings"><Settings className="mr-2 h-4 w-4" />Settings</Link></DropdownMenuItem>
+                    <DropdownMenuItem asChild><Link href="/dashboard/billing"><CreditCard className="mr-2 h-4 w-4" />Billing</Link></DropdownMenuItem>
+                    <DropdownMenuItem asChild><Link href="/dashboard/support"><LifeBuoy className="mr-2 h-4 w-4" />Support</Link></DropdownMenuItem>
+                </DropdownMenuGroup>
+                <DropdownMenuSeparator />
+                <DropdownMenuGroup>
+                    <DropdownMenuSub>
+                        <DropdownMenuSubTrigger><Users className="mr-2 h-4 w-4" /><span>Switch Organization</span></DropdownMenuSubTrigger>
+                        <DropdownMenuPortal><DropdownMenuSubContent>
+                                <DropdownMenuLabel>Acme Inc.</DropdownMenuLabel>
+                                <DropdownMenuItem>Stark Industries</DropdownMenuItem>
+                                <DropdownMenuItem>Wayne Enterprises</DropdownMenuItem>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem><PlusCircle className="mr-2 h-4 w-4" /> Create New</DropdownMenuItem>
+                        </DropdownMenuSubContent></DropdownMenuPortal>
+                    </DropdownMenuSub>
+                    <DropdownMenuSub>
+                        <DropdownMenuSubTrigger>
+                            <Sun className="mr-2 h-4 w-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
+                            <Moon className="absolute mr-2 h-4 w-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
+                            <span>Toggle Theme</span>
+                        </DropdownMenuSubTrigger>
+                        <DropdownMenuPortal><DropdownMenuSubContent>
+                                <DropdownMenuItem onClick={() => setTheme("light")}>Light</DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => setTheme("dark")}>Dark</DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => setTheme("system")}>System</DropdownMenuItem>
+                        </DropdownMenuSubContent></DropdownMenuPortal>
+                    </DropdownMenuSub>
+                </DropdownMenuGroup>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={logout}><LogOut className="mr-2 h-4 w-4" />Logout</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
@@ -8081,7 +9796,6 @@ const mainNavItems = [
 
 const settingsNavItems = [
     { href: "/dashboard/settings", icon: Settings, label: "Settings" },
-    { href: "/dashboard/support", icon: LifeBuoy, label: "Support" },
 ]
 
 export function Sidebar() {
@@ -8182,11 +9896,31 @@ export function Sidebar() {
 File: web/src/components/global/providers.tsx
 "use client";
 
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import Cookies from 'js-cookie';
+
+// A simple JWT parser without adding extra dependencies
+const parseJwt = (token: string) => {
+    try {
+        const base64Url = token.split('.')[1];
+        const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+        const jsonPayload = decodeURIComponent(atob(base64).split('').map(function(c) {
+            return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+        }).join(''));
+        return JSON.parse(jsonPayload);
+    } catch (error) {
+        console.error("Failed to parse JWT:", error);
+        return null;
+    }
+};
+
+interface User {
+    email: string;
+}
 
 interface AuthContextType {
   accessToken: string | null;
+  user: User | null;
   login: (token: string, refreshToken: string) => void;
   logout: () => void;
   isAuthenticated: boolean;
@@ -8197,33 +9931,42 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [accessToken, setAccessToken] = useState<string | null>(null);
+  const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    // On initial load, try to get the token from cookies
     const token = Cookies.get('alloy_access_token');
     if (token) {
-      setAccessToken(token);
+      const decodedToken = parseJwt(token);
+      if (decodedToken?.sub) {
+        setUser({ email: decodedToken.sub });
+        setAccessToken(token);
+      }
     }
     setIsLoading(false);
   }, []);
 
-  const login = (token: string, refreshToken: string) => {
-    setAccessToken(token);
-    Cookies.set('alloy_access_token', token, { expires: 1/48, secure: process.env.NODE_ENV === 'production' }); // Expires in 30 mins
-    Cookies.set('alloy_refresh_token', refreshToken, { expires: 7, secure: process.env.NODE_ENV === 'production' });
-  };
+  const login = useCallback((token: string, refreshToken: string) => {
+    const decodedToken = parseJwt(token);
+    if (decodedToken?.sub) {
+      setUser({ email: decodedToken.sub });
+      setAccessToken(token);
+      Cookies.set('alloy_access_token', token, { expires: 1/48, secure: process.env.NODE_ENV === 'production' });
+      Cookies.set('alloy_refresh_token', refreshToken, { expires: 7, secure: process.env.NODE_ENV === 'production' });
+    }
+  }, []);
 
-  const logout = () => {
+  const logout = useCallback(() => {
+    setUser(null);
     setAccessToken(null);
     Cookies.remove('alloy_access_token');
     Cookies.remove('alloy_refresh_token');
-    // Optionally redirect to login page
     window.location.href = '/login';
-  };
+  }, []);
 
   const value = {
     accessToken,
+    user,
     login,
     logout,
     isAuthenticated: !!accessToken,
@@ -8241,10 +9984,9 @@ export const useAuth = () => {
   return context;
 };
 
-// This component replaces the NextAuthProvider
 export const AppProviders = ({ children }: { children: React.ReactNode }) => {
     return <AuthProvider>{children}</AuthProvider>
-}-e 
+};-e 
 -e
 
 File: web/src/hooks/use-mobile.ts
@@ -8296,10 +10038,12 @@ backend/src
 │       │   ├── __init__.cpython-313.pyc
 │       │   ├── auth.cpython-313.pyc
 │       │   ├── health.cpython-313.pyc
-│       │   └── reports.cpython-313.pyc
+│       │   ├── reports.cpython-313.pyc
+│       │   └── utils.cpython-313.pyc
 │       ├── auth.py
 │       ├── health.py
-│       └── reports.py
+│       ├── reports.py
+│       └── utils.py
 ├── core
 │   ├── __pycache__
 │   │   ├── security.cpython-313.pyc
@@ -8322,14 +10066,18 @@ backend/src
 ├── main.py
 ├── services
 │   ├── __pycache__
-│   │   └── report_generator.cpython-313.pyc
-│   └── report_generator.py
+│   │   ├── docling.cpython-313.pyc
+│   │   ├── report_generator.cpython-313.pyc
+│   │   └── search.cpython-313.pyc
+│   ├── docling.py
+│   ├── report_generator.py
+│   └── search.py
 └── utils
     ├── __init__.py
     └── __pycache__
         └── __init__.cpython-313.pyc
 
-16 directories, 29 files
+16 directories, 35 files
 
 Web App Tree:
 web/src
@@ -8345,7 +10093,13 @@ web/src
 │   │   │       └── page.tsx
 │   │   └── (authed)
 │   │       ├── dashboard
-│   │       │   └── page.tsx
+│   │       │   ├── page.tsx
+│   │       │   ├── reports
+│   │       │   │   ├── [id]
+│   │       │   │   │   └── page.tsx
+│   │       │   │   └── page.tsx
+│   │       │   └── settings
+│   │       │       └── page.tsx
 │   │       └── layout.tsx
 │   ├── favicon.ico
 │   ├── globals.css
@@ -8357,12 +10111,19 @@ web/src
 │   ├── global
 │   │   ├── Breadcrumbs.tsx
 │   │   ├── CommandPalette.tsx
+│   │   ├── DashboardGreeting.tsx
 │   │   ├── Footer.tsx
 │   │   ├── Header.tsx
 │   │   ├── Hero.tsx
+│   │   ├── LinesPatternCard.tsx
 │   │   ├── Logo.tsx
+│   │   ├── PromptInputBox.tsx
 │   │   ├── providers.tsx
 │   │   └── Sidebar.tsx
+│   ├── report
+│   │   ├── AIAnalystChat.tsx
+│   │   ├── ChatCreator.tsx
+│   │   └── ReportView.tsx
 │   └── ui
 │       ├── accordion.tsx
 │       ├── alert-dialog.tsx
@@ -8412,10 +10173,12 @@ web/src
 │       └── tooltip.tsx
 ├── hooks
 │   └── use-mobile.ts
-└── lib
-    └── utils.ts
+├── lib
+│   └── utils.ts
+└── types
+    └── report.ts
 
-15 directories, 67 files
+20 directories, 77 files
 
 -----------------------
 

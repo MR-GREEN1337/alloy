@@ -11,7 +11,6 @@ import {
   FileText,
   Search,
   PanelLeft,
-  ChevronsUpDown,
   PlusCircle,
   LogOut,
   Moon,
@@ -109,10 +108,17 @@ export function Header() {
         </div>
 
         {/* --- Right Side: Header Actions --- */}
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-2">
            <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setCommandOpen(true)}>
                 <Search className="h-4 w-4" />
                 <span className="sr-only">Search</span>
+           </Button>
+           
+           <Button asChild variant="ghost" size="sm" className="h-8 gap-1">
+             <Link href="/dashboard/reports">
+                <FileText className="h-4 w-4" />
+                <span className="hidden sm:inline-block">My Reports</span>
+              </Link>
            </Button>
 
            <Button asChild size="sm" className="h-8 gap-1">
@@ -142,34 +148,21 @@ export function Header() {
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 <DropdownMenuGroup>
-                    <DropdownMenuItem asChild>
-                        <Link href="/dashboard/settings"><Settings className="mr-2 h-4 w-4" />Settings</Link>
-                    </DropdownMenuItem>
-                    <DropdownMenuItem asChild>
-                        <Link href="/dashboard/billing"><CreditCard className="mr-2 h-4 w-4" />Billing</Link>
-                    </DropdownMenuItem>
-                    <DropdownMenuItem asChild>
-                        <Link href="/dashboard/support"><LifeBuoy className="mr-2 h-4 w-4" />Support</Link>
-                    </DropdownMenuItem>
+                    <DropdownMenuItem asChild><Link href="/dashboard/settings"><Settings className="mr-2 h-4 w-4" />Settings</Link></DropdownMenuItem>
+                    <DropdownMenuItem asChild><Link href="/dashboard/billing"><CreditCard className="mr-2 h-4 w-4" />Billing</Link></DropdownMenuItem>
+                    <DropdownMenuItem asChild><Link href="/dashboard/support"><LifeBuoy className="mr-2 h-4 w-4" />Support</Link></DropdownMenuItem>
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
                 <DropdownMenuGroup>
                     <DropdownMenuSub>
-                        <DropdownMenuSubTrigger>
-                            <Users className="mr-2 h-4 w-4" />
-                            <span>Switch Organization</span>
-                        </DropdownMenuSubTrigger>
-                        <DropdownMenuPortal>
-                            <DropdownMenuSubContent>
+                        <DropdownMenuSubTrigger><Users className="mr-2 h-4 w-4" /><span>Switch Organization</span></DropdownMenuSubTrigger>
+                        <DropdownMenuPortal><DropdownMenuSubContent>
                                 <DropdownMenuLabel>Acme Inc.</DropdownMenuLabel>
                                 <DropdownMenuItem>Stark Industries</DropdownMenuItem>
                                 <DropdownMenuItem>Wayne Enterprises</DropdownMenuItem>
                                 <DropdownMenuSeparator />
-                                <DropdownMenuItem>
-                                    <PlusCircle className="mr-2 h-4 w-4" /> Create New
-                                </DropdownMenuItem>
-                            </DropdownMenuSubContent>
-                        </DropdownMenuPortal>
+                                <DropdownMenuItem><PlusCircle className="mr-2 h-4 w-4" /> Create New</DropdownMenuItem>
+                        </DropdownMenuSubContent></DropdownMenuPortal>
                     </DropdownMenuSub>
                     <DropdownMenuSub>
                         <DropdownMenuSubTrigger>
@@ -177,20 +170,15 @@ export function Header() {
                             <Moon className="absolute mr-2 h-4 w-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
                             <span>Toggle Theme</span>
                         </DropdownMenuSubTrigger>
-                        <DropdownMenuPortal>
-                            <DropdownMenuSubContent>
+                        <DropdownMenuPortal><DropdownMenuSubContent>
                                 <DropdownMenuItem onClick={() => setTheme("light")}>Light</DropdownMenuItem>
                                 <DropdownMenuItem onClick={() => setTheme("dark")}>Dark</DropdownMenuItem>
                                 <DropdownMenuItem onClick={() => setTheme("system")}>System</DropdownMenuItem>
-                            </DropdownMenuSubContent>
-                        </DropdownMenuPortal>
+                        </DropdownMenuSubContent></DropdownMenuPortal>
                     </DropdownMenuSub>
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={logout}>
-                    <LogOut className="mr-2 h-4 w-4" />
-                    Logout
-                </DropdownMenuItem>
+                <DropdownMenuItem onClick={logout}><LogOut className="mr-2 h-4 w-4" />Logout</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </div>

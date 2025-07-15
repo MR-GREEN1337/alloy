@@ -40,7 +40,6 @@ const mainNavItems = [
 
 const settingsNavItems = [
     { href: "/dashboard/settings", icon: Settings, label: "Settings" },
-    { href: "/dashboard/support", icon: LifeBuoy, label: "Support" },
 ]
 
 export function Sidebar() {

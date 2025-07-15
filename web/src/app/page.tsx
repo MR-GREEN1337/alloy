@@ -1,6 +1,6 @@
 "use client"
 
-import { AlloyHeroSection } from '@/components/global/Hero'
+import { AlloyHeroSection, FeaturesSection } from '@/components/global/Hero'
 import React from 'react'
 import Footer from '@/components/global/Footer'
 
@@ -22,15 +22,16 @@ function page() {
   
   return (
     <>
-    <AlloyHeroSection />
-    <Footer
-    leftLinks={footerLeftLinks}
-    rightLinks={footerRightLinks}
-    copyrightText="The Cultural Due Diligence Platform."
-    problemStatement={problemStatement}
-    solutionStatement={solutionStatement}
-  />
-</>
+      <AlloyHeroSection />
+      <FeaturesSection />
+      <Footer
+        leftLinks={footerLeftLinks}
+        rightLinks={footerRightLinks}
+        copyrightText="The Cultural Due Diligence Platform."
+        problemStatement={problemStatement}
+        solutionStatement={solutionStatement}
+      />
+    </>
   )
 }
 

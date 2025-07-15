@@ -2,6 +2,9 @@ import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Link from 'next/link';
 import Logo from './Logo';
+import { BarChart, AlertTriangle, Zap, BrainCircuit, ShieldCheck, Code2 } from 'lucide-react';
+import { LinesPatternCard, LinesPatternCardBody } from './LinesPatternCard';
+
 
 // Helper component for glowing feature tags
 interface FeatureItemProps {
@@ -223,6 +226,77 @@ const Lightning: React.FC<LightningProps> = ({
 
   return <canvas ref={canvasRef} className="w-full h-full relative" />;
 };
+
+const featureList = [
+  {
+    icon: BarChart,
+    title: 'Data-Driven Compatibility Score',
+    description: 'Go beyond financials. Our core metric quantifies cultural alignment by analyzing millions of taste-based data points from Qloo\'s AI.',
+  },
+  {
+    icon: AlertTriangle,
+    title: 'Culture Clash Identification',
+    description: 'Proactively identify potential integration risks. We highlight areas of stark cultural divergence between brand audiences before they become post-merger problems.',
+  },
+  {
+    icon: Zap,
+    title: 'Untapped Growth Discovery',
+    description: 'Uncover hidden synergies. Alloy pinpoints shared cultural passions, revealing immediate opportunities for joint marketing, product bundling, and cross-promotion.',
+  },
+  {
+    icon: BrainCircuit,
+    title: 'AI-Powered Brand Archetyping',
+    description: 'Understand the "why" behind the data. Gemini generates a deep, qualitative summary of each brand\'s persona and values based on their cultural DNA.',
+  },
+  {
+    icon: ShieldCheck,
+    title: 'Secure & Confidential Analysis',
+    description: 'Your strategic analysis is sensitive. Our platform ensures end-to-end security, with robust authentication and data handling for peace of mind.',
+  },
+  {
+    icon: Code2,
+    title: 'API-First for Seamless Integration',
+    description: 'Built for power users. Integrate Alloy\'s cultural intelligence directly into your existing M&A workflows and proprietary models with our robust API.',
+  },
+];
+
+
+export const FeaturesSection = () => (
+  <section className="bg-black py-20 sm:py-32">
+    <div className="mx-auto max-w-7xl px-6 lg:px-8">
+      <div className="mx-auto max-w-2xl lg:text-center">
+        <h2 className="text-base font-semibold leading-7 text-blue-400">The Alloy Advantage</h2>
+        <p className="mt-2 text-3xl font-bold tracking-tight text-white sm:text-4xl">
+          De-Risk Deals with Precision Intelligence
+        </p>
+        <p className="mt-6 text-lg leading-8 text-gray-300">
+          Alloy provides a multi-faceted view of cultural compatibility, transforming a traditionally qualitative and high-risk variable into a quantifiable asset.
+        </p>
+      </div>
+      <div className="mx-auto mt-16 max-w-2xl sm:mt-20 lg:mt-24 lg:max-w-none">
+        <dl className="grid max-w-xl grid-cols-1 gap-8 lg:max-w-none lg:grid-cols-3">
+          {featureList.map((feature) => (
+            <LinesPatternCard 
+              key={feature.title} 
+              className="flex flex-col bg-neutral-950 border-white/10"
+              gradientClassName="from-neutral-950/90 via-neutral-950/40 to-neutral-950/10"
+            >
+              <LinesPatternCardBody>
+                <dt className="flex items-center gap-x-3 text-base font-semibold leading-7 text-white">
+                  <feature.icon className="h-5 w-5 flex-none text-blue-400" aria-hidden="true" />
+                  {feature.title}
+                </dt>
+                <dd className="mt-4 flex flex-auto flex-col text-base leading-7 text-gray-300">
+                  <p className="flex-auto">{feature.description}</p>
+                </dd>
+              </LinesPatternCardBody>
+            </LinesPatternCard>
+          ))}
+        </dl>
+      </div>
+    </div>
+  </section>
+);
 
 
 // The main Alloy Hero Component

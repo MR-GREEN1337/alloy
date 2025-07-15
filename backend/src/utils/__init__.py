@@ -55,14 +55,21 @@ async def lifespan(app: FastAPI):
     logger.info(f"Starting up in {settings.ENVIRONMENT} mode...")
     start_time = time.time()
     
-    # --- THIS IS THE FIX ---
     # Resolve all model relationships before touching the database.
     rebuild_all_models()
-    # --- END FIX ---
 
     try:
         await postgres_db.create_db_and_tables()
         logger.info("Database connection and tables verified.")
+
+        # CORE FIX: In development, after recreating the schema, the connection
+        # pool may contain stale connections with invalid prepared statement
+        # caches. Disposing the pool forces new, clean connections to be made.
+        if settings.ENVIRONMENT == "development":
+            logger.warning("DEV MODE: Disposing connection pool to clear caches after schema rebuild.")
+            await postgres_db.engine.dispose()
+            logger.info("Connection pool disposed successfully.")
+
     except Exception as e:
         logger.critical(f"Database connection failed: {e}")
         if settings.FAIL_FAST:

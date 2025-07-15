@@ -3,7 +3,7 @@ export interface Report {
     title: string;
     acquirer_brand: string;
     target_brand: string;
-    status: 'PENDING' | 'COMPLETED' | 'FAILED';
+    status: 'PENDING' | 'COMPLETED' | 'FAILED' | 'DRAFT';
     created_at: string;
     updated_at: string;
     user_id: number;
@@ -16,9 +16,12 @@ export interface Report {
     id: number;
     cultural_compatibility_score: number;
     affinity_overlap_score: number;
-    brand_archetype_summary: string; // This is a JSON string
+    brand_archetype_summary: string; 
     strategic_summary: string;
     report_id: number;
+    search_sources?: { title: string; url: string; }[];
+    acquirer_sources?: { title: string; url: string; }[];
+    target_sources?: { title: string; url: string; }[];
   }
   
   export type ClashSeverity = 'LOW' | 'MEDIUM' | 'HIGH';

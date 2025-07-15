@@ -1,26 +1,32 @@
-FROM python:3.13-slim
+FROM python:3.13-slim-bookworm
 
 ENV PYTHONUNBUFFERED=true
 WORKDIR /app
 
 # Install required system packages
-RUN apt-get update && apt-get -y install libpq-dev gcc libcairo2-dev
+RUN apt-get update && apt-get -y install libpq-dev gcc curl && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Copy app files and install dependencies
-COPY /requirements.txt .
-#COPY .env .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install uv and move to PATH
+ADD https://astral.sh/uv/install.sh /uv-installer.sh
+RUN sh /uv-installer.sh && rm /uv-installer.sh
+ENV PATH="/root/.local/bin/:$PATH"
 
-COPY /cosm/ ./cosm/
+# Copy dependency files and install dependencies
+COPY pyproject.toml uv.lock ./
+RUN uv sync --locked
 
-# Fatal issue /!\
-# COPY ./service-account.json ./
+# DEBUG STEP
+RUN uv run uvicorn --version
 
-# Set environment
+# Copy source code
+COPY src/ ./src/
+
+# Environment
 ENV PYTHONPATH=/app
 ENV PORT=8000
 
 EXPOSE 8000
 
-# Run directly
-CMD ["adk", "api_server", "--allow_origins", "*"]
+# Run app
+CMD ["uv", "run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -5,6 +5,7 @@ import { useAuth } from '@/components/global/providers';
 import { ReportView, ReportViewSkeleton } from '@/components/report/ReportView';
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { AlertCircle } from 'lucide-react';
+import { useParams } from 'next/navigation';
 
 const fetcher = (url: string, token: string) => 
   fetch(url, { headers: { 'Authorization': `Bearer ${token}` } }).then(res => {
@@ -17,10 +18,11 @@ const fetcher = (url: string, token: string) =>
     return res.json();
   });
 
-export default function ReportPage({ params }: { params: { id: string } }) {
+export default function ReportPage() {
+    const { id } = useParams<{ id: string }>();
     const { accessToken } = useAuth();
     const { data: report, error, isLoading } = useSWR(
-        accessToken ? [`${process.env.NEXT_PUBLIC_API_URL}/reports/${params.id}`, accessToken] : null,
+        accessToken ? [`${process.env.NEXT_PUBLIC_API_URL}/reports/${id}`, accessToken] : null,
         ([url, token]) => fetcher(url, token)
     );
 
@@ -44,5 +46,6 @@ export default function ReportPage({ params }: { params: { id: string } }) {
         return null;
     }
 
+    // The main view is now full-height, no container needed here.
     return <ReportView report={report} />;
 }
