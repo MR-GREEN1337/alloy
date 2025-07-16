@@ -33,6 +33,7 @@ export default function SettingsPage() {
   const { setTheme } = useTheme();
 
   // State for forms
+  //@ts-ignore
   const [fullName, setFullName] = useState(user?.full_name || '');
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');

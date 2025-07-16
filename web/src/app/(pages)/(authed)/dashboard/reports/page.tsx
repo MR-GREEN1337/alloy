@@ -22,7 +22,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Skeleton } from "@/components/ui/skeleton";
-import { AlertCircle, CheckCircle, Clock, PlusCircle, Trash2, XCircle } from "lucide-react";
+import { AlertCircle, CheckCircle, Clock, FileText, PlusCircle, Trash2, XCircle } from "lucide-react";
 import { Report } from "@/types/report";
 import { toast } from "sonner";
 import {
@@ -62,8 +62,17 @@ const StatusBadge = ({ status }: { status: Report['status'] }) => {
         COMPLETED: { variant: 'default', icon: CheckCircle, text: 'Completed', className: 'bg-green-500/20 text-green-700 border-green-500/30 dark:text-green-400' },
         PENDING: { variant: 'secondary', icon: Clock, text: 'In Progress', className: 'bg-yellow-500/20 text-yellow-700 border-yellow-500/30 dark:text-yellow-400' },
         FAILED: { variant: 'destructive', icon: XCircle, text: 'Failed', className: 'bg-red-500/20 text-red-700 border-red-500/30 dark:text-red-400' },
-    }[status] || { variant: 'secondary', icon: Clock, text: 'Unknown' };
-    return <Badge variant={config.variant} className={config.className}><config.icon className="mr-1 h-3 w-3" />{config.text}</Badge>;
+        DRAFT: { variant: 'outline', icon: FileText, text: 'Draft', className: 'bg-gray-500/20 text-gray-700 border-gray-500/30 dark:text-gray-400' },
+    }[status];
+
+    const Icon = config.icon;
+    
+    return (
+        <Badge variant={config.variant as any} className={config.className}>
+            <Icon className="w-3 h-3 mr-1" />
+            {config.text}
+        </Badge>
+    );
 };
 
 // --- Main Reports Page Component ---

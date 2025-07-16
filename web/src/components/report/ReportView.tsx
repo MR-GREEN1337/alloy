@@ -17,16 +17,16 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { AlertTriangle, TrendingUp, Zap, Link as LinkIcon, Globe, Users, Target, Scaling, Trophy } from "lucide-react";
+import { AlertTriangle, TrendingUp, Zap, Link as LinkIcon, Globe, Users, Target, Trophy } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Report, ClashSeverity } from "@/types/report";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { AIAnalystChat } from "./AIAnalystChat";
 import Image from "next/image";
 import Link from "next/link";
-import { Bar, BarChart, ResponsiveContainer, XAxis, YAxis, Tooltip, RadialBar, RadialBarChart, Legend } from 'recharts';
+import { Bar, BarChart, ResponsiveContainer, XAxis, YAxis, Tooltip, RadialBar, RadialBarChart } from 'recharts';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
-import { ChartContainer, ChartTooltipContent } from "../ui/chart";
+import { ChartContainer } from "../ui/chart";
 import { ScrollArea } from "../ui/scroll-area";
 
 interface ReportViewProps {

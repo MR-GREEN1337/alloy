@@ -393,6 +393,7 @@ export const AlloyHeroSection: React.FC = () => {
             className="relative z-30 flex flex-col items-center max-w-4xl mx-auto"
           >
             <motion.div
+              //@ts-ignore
               variants={itemVariants}
               className="flex items-center space-x-2 px-4 py-2 bg-white/5 hover:bg-white/10 backdrop-blur-sm rounded-full text-sm mb-6 transition-all duration-300 group"
             >
@@ -400,6 +401,7 @@ export const AlloyHeroSection: React.FC = () => {
             </motion.div>
 
             <motion.h1
+              //@ts-ignore
               variants={itemVariants}
               className="text-5xl md:text-7xl font-light mb-2 tracking-tighter"
             >
@@ -407,6 +409,7 @@ export const AlloyHeroSection: React.FC = () => {
             </motion.h1>
 
             <motion.h2
+              //@ts-ignore
               variants={itemVariants}
               className="text-3xl md:text-5xl pb-3 font-light bg-gradient-to-r from-gray-200 via-gray-300 to-gray-400 bg-clip-text text-transparent"
             >
@@ -414,6 +417,7 @@ export const AlloyHeroSection: React.FC = () => {
             </motion.h2>
 
             <motion.p
+              //@ts-ignore
               variants={itemVariants}
               className="text-gray-400 mb-9 max-w-2xl mt-4"
             >
@@ -422,7 +426,8 @@ export const AlloyHeroSection: React.FC = () => {
 
             <Link href="/login">
               <motion.button
-                variants={itemVariants}
+                //@ts-ignore
+              variants={itemVariants}
                 whileHover={{ scale: 1.05 }}
                 whileTap={{ scale: 0.95 }}
                 className="px-8 py-3 bg-white text-black font-semibold rounded-full hover:bg-gray-200 transition-colors"
