@@ -44,7 +44,7 @@ class Report(SQLModel, table=True):
     target_brand: Optional[str] = Field(default=None)
     status: ReportStatus = Field(default=ReportStatus.DRAFT, sa_column=Column(TEXT, nullable=False))
     extracted_file_context: Optional[str] = Field(default=None, sa_column=Column(TEXT))
-    created_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime(timezone=True), server_default=func.now(), nullable=False))
     updated_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False))
     user_id: int = Field(foreign_key="user.id")
 

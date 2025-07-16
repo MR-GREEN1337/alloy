@@ -15,5 +15,5 @@ class HealthCheck(BaseModel):
     summary="Perform a Health Check",
     description="Checks the operational status of the API service.",
 )
-def health_check(app_version: str = "0.1.0"):
+def health_check(app_version: str = "1.0.0"):
     return HealthCheck(status="ok", version=app_version)

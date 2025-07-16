@@ -47,7 +47,7 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
     setIsLoading(true);
 
     const botMessageId = `bot-${Date.now()}`;
-    setMessages(prev => [...prev, { id: botMessageId, sender: 'bot', text: '' }]);
+    setMessages(prev => [...prev, { id: botMessageId, sender: 'bot', text: '...' }]);
 
     try {
         const reportContext = `
@@ -75,6 +75,7 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
       
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
+      setMessages(prev => prev.map(msg => msg.id === botMessageId ? { ...msg, text: '' } : msg)); // Clear the "..."
       let done = false;
 
       while (!done) {
@@ -87,7 +88,11 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
       }
 
     } catch (error: any) {
-        toast.error("Chat Error", { description: error.message });
+        const errorMessage = "I'm sorry, I encountered an error. Please try again.";
+        toast.error("Chat Error", { description: error.message || "An unknown error occurred." });
+        setMessages(prev => prev.map(msg => 
+            msg.id === botMessageId ? { ...msg, text: errorMessage } : msg
+        ));
         setMessages(prev => prev.filter(msg => msg.id !== botMessageId));
     } finally {
         setIsLoading(false);

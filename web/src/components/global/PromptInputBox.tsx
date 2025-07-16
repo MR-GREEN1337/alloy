@@ -2,7 +2,7 @@
 
 import React, { useState, useRef, useEffect } from "react";
 import * as TooltipPrimitive from "@radix-ui/react-tooltip";
-import { ArrowUp, Paperclip, X, FileText, Search, Bot, ChevronsRight, Database, BrainCircuit, CheckCircle, AlertTriangle, Link as LinkIcon, Sparkles, Loader2 } from "lucide-react";
+import { ArrowUp, Paperclip, X, Search, Bot, Database, BrainCircuit, CheckCircle, AlertTriangle, Link as LinkIcon, Sparkles, Loader2, Microscope, MessageSquareQuote } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -28,12 +28,13 @@ const createDraftReport = async (url: string, { arg }: { arg: { token: string }}
 // TYPES
 interface Step {
   id: string;
-  status: 'info' | 'search' | 'source' | 'qloo' | 'synthesis' | 'saving' | 'complete' | 'error';
+  status: 'info' | 'search' | 'source' | 'analysis' | 'reasoning' | 'synthesis' | 'saving' | 'complete' | 'error';
   message?: string;
   payload?: any;
 }
 
 interface UploadedFileStatus {
+    id: string;
     name: string;
     status: 'uploading' | 'success' | 'error';
     message?: string;
@@ -45,7 +46,8 @@ interface PromptInputBoxProps {
   className?: string;
 }
 
-// TOOLTIP
+// --- CHILD COMPONENTS ---
+
 const TooltipProvider = TooltipPrimitive.Provider;
 const Tooltip = TooltipPrimitive.Root;
 const TooltipTrigger = TooltipPrimitive.Trigger;
@@ -54,30 +56,23 @@ const TooltipContent = React.forwardRef<React.ElementRef<typeof TooltipPrimitive
 ));
 TooltipContent.displayName = TooltipPrimitive.Content.displayName;
 
-// FAVICON
-const Favicon = ({ url, ...props }: { url: string } & Partial<React.ComponentProps<typeof Image>>) => {
-    const API_URL = process.env.NEXT_PUBLIC_API_URL;
-    const faviconUrl = `${API_URL}/utils/favicon?url=${encodeURIComponent(url)}`;
+const SourceItem = ({ source }: { source: { url: string, title?: string }}) => {
+    const faviconUrl = `https://satori-rho.vercel.app/api/image?url=${source.url}`;
     return (
-        <Image 
-            src={faviconUrl} 
-            alt="favicon" 
-            width={16} 
-            height={16} 
-            className="rounded-full"
-            unoptimized 
-            {...props}
-        />
+        <Link href={source.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 group">
+            <Image src={faviconUrl} alt="source favicon" width={16} height={16} className="rounded-full" unoptimized/>
+            <span className="truncate group-hover:underline text-blue-600 dark:text-blue-400">{source.title || source.url}</span>
+        </Link>
     );
 };
 
-// STEP ITEM COMPONENT
 const StepItem = ({ step }: { step: Step }) => {
     const ICONS = {
         info: <Bot className="h-4 w-4 text-primary" />,
         search: <Search className="h-4 w-4 text-blue-500" />,
         source: <LinkIcon className="h-4 w-4 text-muted-foreground" />,
-        qloo: <ChevronsRight className="h-4 w-4 text-purple-500" />,
+        analysis: <Microscope className="h-4 w-4 text-purple-500" />,
+        reasoning: <MessageSquareQuote className="h-4 w-4 text-gray-500" />,
         synthesis: <BrainCircuit className="h-4 w-4 text-amber-500" />,
         saving: <Database className="h-4 w-4 text-green-500" />,
         complete: <CheckCircle className="h-4 w-4 text-green-500" />,
@@ -85,13 +80,9 @@ const StepItem = ({ step }: { step: Step }) => {
     };
 
     const renderContent = () => {
+        // CORE FIX: When the step is a source, render the SourceItem component
         if (step.status === 'source' && step.payload) {
-            return (
-                <Link href={step.payload.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 group">
-                    <Favicon url={step.payload.url} />
-                    <span className="truncate group-hover:underline">{step.payload.title || step.payload.url}</span>
-                </Link>
-            );
+            return <SourceItem source={step.payload} />;
         }
         return step.message;
     };
@@ -99,18 +90,20 @@ const StepItem = ({ step }: { step: Step }) => {
     return (
         <motion.div layout initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.3 }} className="flex items-start gap-3 text-sm">
             <div className="flex-shrink-0 mt-0.5">{ICONS[step.status] || <Sparkles className="h-4 w-4" />}</div>
-            <div className={cn("flex-grow", step.status === 'error' && "text-destructive font-medium")}>{renderContent()}</div>
+            <div className={cn("flex-grow", 
+                step.status === 'error' && "text-destructive font-medium",
+                step.status === 'reasoning' && "text-muted-foreground italic"
+            )}>{renderContent()}</div>
         </motion.div>
     );
 };
 
-// MAIN COMPONENT
+// --- MAIN COMPONENT ---
 export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxProps>(
   ({ onReportCreated, onPristineChange, className }, ref) => {
     const { accessToken } = useAuth();
     const API_URL = process.env.NEXT_PUBLIC_API_URL;
 
-    // Input state
     const [draftReportId, setDraftReportId] = useState<number | null>(null);
     const [acquirer, setAcquirer] = useState("");
     const [target, setTarget] = useState("");
@@ -118,10 +111,8 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
     const [uploadedFile, setUploadedFile] = useState<UploadedFileStatus | null>(null);
     const [useGrounding, setUseGrounding] = useState(false);
     
-    // Generation state
     const [logSteps, setLogSteps] = useState<Step[]>([]);
     const [sources, setSources] = useState<Step[]>([]);
-    const [allSourcesStreamed, setAllSourcesStreamed] = useState(false);
     const [isGenerating, setIsGenerating] = useState(false);
     const [isCollapsibleOpen, setIsCollapsibleOpen] = useState(true);
 
@@ -145,27 +136,17 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
     const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file || !draftReportId) return;
-
-        setUploadedFile({ name: file.name, status: 'uploading' });
-
+        const fileId = `${file.name}-${Date.now()}`;
+        setUploadedFile({ id: fileId, name: file.name, status: 'uploading' });
         const formData = new FormData();
         formData.append('file', file);
-
         try {
-            const response = await fetch(`${API_URL}/reports/${draftReportId}/upload_context_file`, {
-                method: 'POST',
-                headers: { 'Authorization': `Bearer ${accessToken!}` },
-                body: formData,
-            });
-
-            const result = await response.json();
-            if (!response.ok) { throw new Error(result.detail || 'File upload failed'); }
-
-            setUploadedFile({ name: file.name, status: 'success', message: 'Context uploaded' });
+            const res = await fetch(`${API_URL}/reports/${draftReportId}/upload_context_file`, { method: 'POST', headers: { 'Authorization': `Bearer ${accessToken!}` }, body: formData });
+            if (!res.ok) { const errorData = await res.json(); throw new Error(errorData.detail || 'File upload failed'); }
+            setUploadedFile({ id: fileId, name: file.name, status: 'success', message: 'Context uploaded' });
             toast.success("Context file uploaded successfully.");
-
         } catch (error: any) {
-            setUploadedFile({ name: file.name, status: 'error', message: error.message });
+            setUploadedFile({ id: fileId, name: file.name, status: 'error', message: error.message });
             toast.error("File Upload Failed", { description: error.message });
         }
     };
@@ -175,19 +156,13 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
              toast.error("Invalid Input", { description: "Please provide full, official brand names."});
             return;
         }
-        setIsGenerating(true);
-        setLogSteps([]);
-        setSources([]);
-        setAllSourcesStreamed(false);
-        setIsCollapsibleOpen(true);
+        setIsGenerating(true); setLogSteps([]); setSources([]); setIsCollapsibleOpen(true);
         
         try {
             const response = await fetch(`${API_URL}/reports/${draftReportId}/generate`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken!}` },
+                method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken!}` },
                 body: JSON.stringify({ acquirer_brand: acquirer, target_brand: target, title: `${acquirer} vs. ${target}`, context: notes, use_grounding: useGrounding })
             });
-
             if (!response.ok || !response.body) { throw new Error(response.statusText || "Server response was invalid."); }
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
@@ -204,20 +179,19 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
                     if (line.startsWith('data: ')) {
                         const jsonData = JSON.parse(line.substring(6));
                         const newStep: Step = { id: `step-${Date.now()}-${Math.random()}`, ...jsonData };
-                        if (newStep.status === 'source') setSources(prev => [...prev, newStep]);
-                        else {
-                            setLogSteps(prev => [...prev, newStep]);
-                            if (newStep.status !== 'search' && !allSourcesStreamed) { setAllSourcesStreamed(true); setIsCollapsibleOpen(false); }
-                        }
+                        if (newStep.status === 'source') { setSources(prev => [...prev, newStep]); } 
+                        else { setLogSteps(prev => [...prev, newStep]); }
+                        
                         if (newStep.status === 'complete') {
                             toast.success("Report generated successfully!");
                             onReportCreated();
-                            setTimeout(() => setIsGenerating(false), 1000);
+                            setTimeout(() => handleReset(false), 1000);
                             return;
                         }
                         if (newStep.status === 'error') {
                             toast.error("Generation Failed", { description: newStep.message });
-                            setIsGenerating(false); return;
+                            handleReset();
+                            return;
                         }
                     }
                 }
@@ -225,16 +199,10 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
         } catch (err: any) { toast.error("An error occurred", { description: err.message }); setIsGenerating(false); }
     };
     
-    const handleReset = () => {
-        setIsGenerating(false);
-        setLogSteps([]);
-        setSources([]);
-        setAllSourcesStreamed(false);
-        setAcquirer("");
-        setTarget("");
-        setNotes("");
-        setUploadedFile(null);
-        setDraftReportId(null);
+    const handleReset = (resetId = true) => {
+        setIsGenerating(false); setLogSteps([]); setSources([]);
+        setAcquirer(""); setTarget(""); setNotes(""); setUploadedFile(null);
+        if (resetId) setDraftReportId(null);
     }
 
     const canSubmit = acquirer.trim().length > 1 && target.trim().length > 1 && uploadedFile?.status !== 'uploading';
@@ -243,18 +211,18 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
         return <div ref={ref} className={cn("w-full max-w-3xl mx-auto", className)}>
             <motion.div layout className="relative w-full rounded-2xl border border-border bg-card shadow-xl transition-all">
                 <div className="p-4"><h3 className="font-semibold text-center text-foreground">Generating Report...</h3><p className="text-center text-sm text-muted-foreground">{acquirer} vs. {target}</p></div>
-                <ScrollArea className="h-64 px-4" ref={scrollAreaRef}>
+                <ScrollArea className="h-[30rem] max-h-[60vh] px-4" ref={scrollAreaRef}>
                     <div className="space-y-3 py-4">
                         <AnimatePresence>{logSteps.map((step) => <StepItem key={step.id} step={step} />)}</AnimatePresence>
                         {sources.length > 0 && <Collapsible open={isCollapsibleOpen} onOpenChange={setIsCollapsibleOpen}>
                             <CollapsibleTrigger className="w-full p-2 rounded-md hover:bg-muted/50 text-left">
-                                <div className="flex items-center justify-between"><div className="flex items-center gap-2 overflow-hidden"><span className="text-sm font-medium">Found {sources.length} sources</span><div className="flex items-center gap-1.5 flex-shrink min-w-0">{sources.map(source => <motion.div key={source.id} layout><Favicon url={source.payload.url}/></motion.div>)}</div></div><span className="text-xs text-muted-foreground">{isCollapsibleOpen ? 'Collapse' : 'Expand'}</span></div>
+                                <div className="flex items-center justify-between"><div className="flex items-center gap-2 overflow-hidden"><Search className="h-4 w-4 text-blue-500 flex-shrink-0"/><span className="text-sm font-medium">Found {sources.length} sources</span><div className="flex items-center gap-1.5 flex-shrink min-w-0">{sources.map(source => <motion.div key={source.id} layout><Image src={`https://satori-rho.vercel.app/api/image?url=${source.payload.url}`} alt="favicon" width={16} height={16} className="rounded-full" unoptimized/></motion.div>)}</div></div><span className="text-xs text-muted-foreground">{isCollapsibleOpen ? 'Collapse' : 'Expand'}</span></div>
                             </CollapsibleTrigger>
                             <CollapsibleContent className="space-y-3 pt-2">{sources.map(source => <StepItem key={source.id} step={source} />)}</CollapsibleContent>
                         </Collapsible>}
                     </div>
                 </ScrollArea>
-                <div className="flex items-center justify-end p-2 border-t border-border"><Button onClick={handleReset} disabled={isGenerating}>Create New Report</Button></div>
+                <div className="flex items-center justify-end p-2 border-t border-border"><Button onClick={() => handleReset(true)}>Create New Report</Button></div>
             </motion.div>
         </div>
     }

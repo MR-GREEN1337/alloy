@@ -12,14 +12,15 @@ class Settings(BaseSettings):
     # Security & JWT
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # AI APIs
     QLOO_API_KEY: str
     GEMINI_API_KEY: str
-    GEMINI_MODEL_NAME: str = "gemini-2.5-flash"# for prod "gemini-2.5-pro"
+    GEMINI_MODEL_NAME: str = "gemini-2.5-flash"
     TAVILY_API_KEY: str
+    SCRAPER_API_KEY: str
     
     # Google OAuth
     GOOGLE_CLIENT_ID: str
@@ -32,7 +33,7 @@ class Settings(BaseSettings):
     POSTGRES_MAX_OVERFLOW: int = 5
     POSTGRES_POOL_TIMEOUT: int = 30
     POSTGRES_POOL_RECYCLE: int = 1800
-    POSTGRES_USE_SSL: bool = False
+    POSTGRES_USE_SSL: bool = True
 
     # CORS & Frontend
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]

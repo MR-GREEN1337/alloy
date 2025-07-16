@@ -2,8 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import React, { useState, useEffect } from "react";
-import { useTheme } from "next-themes";
+import React, { useState, useEffect, useMemo } from "react";
 import {
   Home,
   Users,
@@ -13,9 +12,6 @@ import {
   PanelLeft,
   PlusCircle,
   LogOut,
-  Moon,
-  Sun,
-  Laptop,
   CreditCard,
   LifeBuoy
 } from "lucide-react";
@@ -36,10 +32,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Logo } from "@/components/global/Logo";
 import { useAuth } from "./providers";
 import { CommandPalette } from "./CommandPalette";
+import { UserAvatar } from "./UserAvatar";
 
 const mobileNavItems = [
   { href: "/dashboard", icon: Home, label: "Dashboard" },
@@ -52,7 +48,6 @@ const mobileNavItems = [
 
 export function Header() {
   const { logout, user } = useAuth();
-  const { setTheme } = useTheme();
   const [isCommandOpen, setCommandOpen] = useState(false);
   const pathname = usePathname();
 
@@ -67,12 +62,10 @@ export function Header() {
     return () => document.removeEventListener("keydown", down);
   }, []);
   
-  const getInitials = (email?: string) => {
-    return email ? email.charAt(0).toUpperCase() : "A";
-  };
-
-  const displayName = user?.email.split('@')[0] || "User";
-
+  const displayName = useMemo(
+    () => user?.full_name || user?.email?.split('@')[0] || "User",
+    [user]
+  );
   return (
     <>
       <header className="sticky top-0 z-30 flex h-16 items-center justify-between gap-4 border-b bg-background px-4 sm:px-6">
@@ -86,7 +79,7 @@ export function Header() {
                 </Button>
             </SheetTrigger>
             <SheetContent side="left" className="sm:max-w-xs">
-                <nav className="grid gap-6 text-lg font-medium">
+                <nav className="grid gap-6 text-lg font-medium mt-6">
                 <Logo />
                 {mobileNavItems.map((item) => {
                     const isActive = pathname.startsWith(item.href) && (item.href !== "/dashboard" || pathname === "/dashboard");
@@ -132,12 +125,7 @@ export function Header() {
 
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" className="relative h-9 w-9 rounded-full">
-                <Avatar className="h-9 w-9">
-                  <AvatarImage src="" alt={displayName} />
-                  <AvatarFallback>{getInitials(user?.email)}</AvatarFallback>
-                </Avatar>
-              </Button>
+               <Button variant="ghost" className="relative h-9 w-9 rounded-full"><UserAvatar user={user} /></Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent className="w-64" align="end" forceMount>
                 <DropdownMenuLabel className="font-normal">
@@ -162,18 +150,6 @@ export function Header() {
                                 <DropdownMenuItem>Wayne Enterprises</DropdownMenuItem>
                                 <DropdownMenuSeparator />
                                 <DropdownMenuItem><PlusCircle className="mr-2 h-4 w-4" /> Create New</DropdownMenuItem>
-                        </DropdownMenuSubContent></DropdownMenuPortal>
-                    </DropdownMenuSub>
-                    <DropdownMenuSub>
-                        <DropdownMenuSubTrigger>
-                            <Sun className="mr-2 h-4 w-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
-                            <Moon className="absolute mr-2 h-4 w-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
-                            <span>Toggle Theme</span>
-                        </DropdownMenuSubTrigger>
-                        <DropdownMenuPortal><DropdownMenuSubContent>
-                                <DropdownMenuItem onClick={() => setTheme("light")}>Light</DropdownMenuItem>
-                                <DropdownMenuItem onClick={() => setTheme("dark")}>Dark</DropdownMenuItem>
-                                <DropdownMenuItem onClick={() => setTheme("system")}>System</DropdownMenuItem>
                         </DropdownMenuSubContent></DropdownMenuPortal>
                     </DropdownMenuSub>
                 </DropdownMenuGroup>

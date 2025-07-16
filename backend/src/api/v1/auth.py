@@ -1,12 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Header
 from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
-from typing import Annotated, Optional, Dict, Any
-from sqlmodel import select, SQLModel
+from typing import Annotated, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from urllib.parse import urlencode
 import httpx
-from jose import jwt
 from loguru import logger
 
 from src.core.security import (
@@ -47,7 +45,6 @@ GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 GOOGLE_SCOPES = "openid email profile"
-
 
 # --- Helper Function ---
 async def create_user_if_not_exists(session: AsyncSession, user_data: Dict[str, Any]) -> models.User:
@@ -103,7 +100,7 @@ async def login_for_access_token(
             {"WWW-Authenticate": "Bearer"},
         )
     
-    token_data = {"sub": user.email}
+    token_data = {"sub": user.email, "full_name": user.full_name}
     return Token(
         access_token=create_access_token(data=token_data),
         refresh_token=create_refresh_token(data=token_data),
@@ -123,8 +120,9 @@ async def refresh_access_token(
     if not user:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found")
 
+    new_token_data = {"sub": user.email, "full_name": user.full_name}
     return TokenRefreshResponse(
-        access_token=create_access_token(data={"sub": user.email}),
+        access_token=create_access_token(data=new_token_data),
         token_type="bearer"
     )
 
@@ -145,7 +143,7 @@ async def google_authorize(request: Request):
 
 @router.get("/google/callback", tags=["auth"], response_class=RedirectResponse)
 async def google_callback(
-    request: Request, code: str, session: AsyncSession = Depends(get_session)
+    request: Request, code: str, session: DBSession
 ):
     """Handles the callback from Google, exchanges code for token, and gets user info."""
     redirect_uri = f"{str(request.base_url).rstrip('/')}/api/v1/auth/google/callback"
@@ -181,7 +179,7 @@ async def google_callback(
 
     user = await create_user_if_not_exists(session, {"email": email, "full_name": user_info.get("name")})
     
-    access_token = create_access_token(data={"sub": user.email})
+    access_token = create_access_token(data={"sub": user.email, "full_name": user.full_name})
     refresh_token = create_refresh_token(data={"sub": user.email})
 
     params = urlencode({"access_token": access_token, "refresh_token": refresh_token})

@@ -1,6 +1,6 @@
 from fastapi import UploadFile, HTTPException, status
 from loguru import logger
-import openpyxl
+import openpyxl # type: ignore
 from pypdf import PdfReader
 import io
 
@@ -14,7 +14,7 @@ async def process_document_with_docling(file: UploadFile) -> str:
     
     file_bytes = await file.read()
     text_content = ""
-
+    
     try:
         if content_type == "application/pdf":
             reader = PdfReader(io.BytesIO(file_bytes))
@@ -22,7 +22,7 @@ async def process_document_with_docling(file: UploadFile) -> str:
                 text_content += page.extract_text() or ""
         
         elif content_type in ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel"]:
-            workbook = openpyxl.load_workbook(io.BytesIO(file_bytes))
+            workbook = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
             for sheet_name in workbook.sheetnames:
                 sheet = workbook[sheet_name]
                 text_content += f"\n--- Sheet: {sheet_name} ---\n"
@@ -31,7 +31,7 @@ async def process_document_with_docling(file: UploadFile) -> str:
                     text_content += row_text + "\n"
 
         elif content_type in ["text/plain", "text/markdown"]:
-            text_content = file_bytes.decode("utf-8")
+            text_content = file_bytes.decode("utf-8", errors="ignore")
 
         else:
             raise HTTPException(

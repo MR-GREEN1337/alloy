@@ -20,6 +20,7 @@ const parseJwt = (token: string) => {
 
 interface User {
     email: string;
+    full_name?: string;
 }
 
 interface AuthContextType {
@@ -42,8 +43,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     const token = Cookies.get('alloy_access_token');
     if (token) {
       const decodedToken = parseJwt(token);
-      if (decodedToken?.sub) {
-        setUser({ email: decodedToken.sub });
+      if (decodedToken && decodedToken.sub) {
+        setUser({ email: decodedToken.sub, full_name: decodedToken.full_name });
         setAccessToken(token);
       }
     }
@@ -52,10 +53,10 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   const login = useCallback((token: string, refreshToken: string) => {
     const decodedToken = parseJwt(token);
-    if (decodedToken?.sub) {
-      setUser({ email: decodedToken.sub });
+    if (decodedToken && decodedToken.sub) {
+      setUser({ email: decodedToken.sub, full_name: decodedToken.full_name });
       setAccessToken(token);
-      Cookies.set('alloy_access_token', token, { expires: 1/48, secure: process.env.NODE_ENV === 'production' });
+      Cookies.set('alloy_access_token', token, { expires: 1/24, secure: process.env.NODE_ENV === 'production' }); // 1 hour
       Cookies.set('alloy_refresh_token', refreshToken, { expires: 7, secure: process.env.NODE_ENV === 'production' });
     }
   }, []);

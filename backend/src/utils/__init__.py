@@ -7,7 +7,7 @@ import json
 
 from src.db.postgresql import postgres_db
 from src.core.settings import get_settings
-from src.db.models import rebuild_all_models # <-- IMPORT THE FIX
+from src.db.models import rebuild_all_models
 
 settings = get_settings()
 

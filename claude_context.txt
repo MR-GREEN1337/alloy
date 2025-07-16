@@ -4,7 +4,7 @@ from passlib.context import CryptContext
 from jose import JWTError, jwt
 from typing import Dict, Any, Optional
 from sqlmodel import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio.session import AsyncSession
 
 from src.core.settings import get_settings
 from src.db import models
@@ -39,7 +39,7 @@ def decode_token(token: str) -> Optional[Dict[str, Any]]:
 async def get_user_by_email(session: AsyncSession, email: str) -> Optional[models.User]:
     """Fetches a user by their email address."""
     statement = select(models.User).where(models.User.email == email)
-    
+
     result = await session.execute(statement)
     return result.scalar_one_or_none()-e 
 -e
@@ -59,14 +59,15 @@ class Settings(BaseSettings):
     # Security & JWT
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # AI APIs
     QLOO_API_KEY: str
     GEMINI_API_KEY: str
-    GEMINI_MODEL_NAME: str = "gemini-2.5-flash"# for prod "gemini-2.5-pro"
+    GEMINI_MODEL_NAME: str = "gemini-2.5-flash"
     TAVILY_API_KEY: str
+    SCRAPER_API_KEY: str
     
     # Google OAuth
     GOOGLE_CLIENT_ID: str
@@ -79,7 +80,7 @@ class Settings(BaseSettings):
     POSTGRES_MAX_OVERFLOW: int = 5
     POSTGRES_POOL_TIMEOUT: int = 30
     POSTGRES_POOL_RECYCLE: int = 1800
-    POSTGRES_USE_SSL: bool = False
+    POSTGRES_USE_SSL: bool = True
 
     # CORS & Frontend
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
@@ -99,7 +100,7 @@ import json
 
 from src.db.postgresql import postgres_db
 from src.core.settings import get_settings
-from src.db.models import rebuild_all_models # <-- IMPORT THE FIX
+from src.db.models import rebuild_all_models
 
 settings = get_settings()
 
@@ -147,14 +148,21 @@ async def lifespan(app: FastAPI):
     logger.info(f"Starting up in {settings.ENVIRONMENT} mode...")
     start_time = time.time()
     
-    # --- THIS IS THE FIX ---
     # Resolve all model relationships before touching the database.
     rebuild_all_models()
-    # --- END FIX ---
 
     try:
         await postgres_db.create_db_and_tables()
         logger.info("Database connection and tables verified.")
+
+        # CORE FIX: In development, after recreating the schema, the connection
+        # pool may contain stale connections with invalid prepared statement
+        # caches. Disposing the pool forces new, clean connections to be made.
+        if settings.ENVIRONMENT == "development":
+            logger.warning("DEV MODE: Disposing connection pool to clear caches after schema rebuild.")
+            await postgres_db.engine.dispose()
+            logger.info("Connection pool disposed successfully.")
+
     except Exception as e:
         logger.critical(f"Database connection failed: {e}")
         if settings.FAIL_FAST:
@@ -176,12 +184,10 @@ from sqlalchemy.sql import text
 from typing import AsyncGenerator, Dict, Any
 from contextlib import asynccontextmanager
 import asyncio
-from datetime import datetime
 from sqlmodel import SQLModel
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 from loguru import logger
 import ssl
-import os
 from src.core.settings import get_settings
 
 settings = get_settings()
@@ -191,38 +197,67 @@ class PostgresDatabase:
     def __init__(self):
         self.DATABASE_URL = settings.POSTGRES_DATABASE_URL
         if not self.DATABASE_URL:
-            logger.warning("DATABASE_URL not set, using development defaults")
-            self.DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:5432/ustadh"
+            raise ValueError("POSTGRES_DATABASE_URL environment variable is not set.")
         
+        # Parse the URL and extract SSL mode if present
         url = urlparse(self.DATABASE_URL)
-        base_url = f"postgresql+asyncpg://{url.netloc}{url.path}"
         self.db_host, self.db_port, self.db_user = url.hostname, url.port or 5432, url.username
-        self.db_name = url.path.lstrip("/") if url.path else None
         self.schema = getattr(settings, "POSTGRES_SCHEMA", "public")
 
-        ssl_context = None
-        if settings.POSTGRES_USE_SSL:
+        # Extract sslmode from query parameters
+        query_params = parse_qs(url.query)
+        sslmode = query_params.get('sslmode', [None])[0]
+        
+        # Remove query parameters from the URL to create a clean database URL
+        clean_url = self.DATABASE_URL.split('?')[0]
+        self.DATABASE_URL = clean_url
+
+        # --- CORRECTED SSL and connect_args LOGIC ---
+        connect_args: Dict[str, Any] = {}
+        
+        # Handle SSL configuration
+        if settings.POSTGRES_USE_SSL or sslmode in ['require', 'prefer']:
             ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+            # The following lines are often needed for cloud providers that don't
+            # have their CA in the default trust store. Adjust as needed.
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
-
-        connect_args = {"ssl": ssl_context} if ssl_context else {}
+            connect_args["ssl"] = ssl_context
+        elif sslmode == 'disable':
+            # Explicitly disable SSL
+            connect_args["ssl"] = False
+        
+        # CORE FIX: In a development environment, prepared statement caching can cause
+        # errors when the schema changes during hot-reloading (e.g., dropping and
+        # recreating tables on startup). Disabling the cache for asyncpg resolves this.
+        if settings.ENVIRONMENT == "development":
+            # The value 0 disables the cache.
+            connect_args["statement_cache_size"] = 0
+            logger.warning(
+                "DEV MODE: Disabling prepared statement cache to prevent schema change errors."
+            )
 
         self.pool_size = settings.POSTGRES_POOL_SIZE
         self.max_overflow = settings.POSTGRES_MAX_OVERFLOW
         self.pool_timeout = settings.POSTGRES_POOL_TIMEOUT
-        self.pool_recycle = int(os.getenv("POSTGRES_POOL_RECYCLE", "1800"))
-        self.max_retries = int(os.getenv("POSTGRES_MAX_RETRIES", "5"))
-        self.retry_delay = int(os.getenv("POSTGRES_RETRY_DELAY", "2"))
+        self.pool_recycle = settings.POSTGRES_POOL_RECYCLE
+        self.max_retries = 5
+        self.retry_delay = 2
         self.debug_mode = settings.DEBUG
 
         try:
             self.engine = create_async_engine(
-                base_url, echo=self.debug_mode, pool_size=self.pool_size, max_overflow=self.max_overflow,
-                pool_timeout=self.pool_timeout, pool_recycle=self.pool_recycle, pool_pre_ping=True, connect_args=connect_args
+                self.DATABASE_URL, 
+                echo=self.debug_mode, 
+                pool_size=self.pool_size, 
+                max_overflow=self.max_overflow,
+                pool_timeout=self.pool_timeout, 
+                pool_recycle=self.pool_recycle, 
+                pool_pre_ping=True, 
+                connect_args=connect_args
             )
             self.async_session_maker = sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
-            logger.info(f"PostgreSQL connection initialized: host={self.db_host}, user={self.db_user}, db={self.db_name}, schema={self.schema}")
+            logger.info(f"PostgreSQL connection initialized: host={self.db_host}, user={self.db_user}, schema={self.schema}")
         except Exception as e:
             logger.error(f"Failed to initialize PostgreSQL connection: {str(e)}")
             raise
@@ -242,7 +277,7 @@ class PostgresDatabase:
                     # Ensure the schema exists
                     await conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {self.schema}"))
                     
-                    # THE FIX: In a dev environment, ensure schema is always up-to-date.
+                    # CORE FIX: In a dev environment, ensure schema is always up-to-date.
                     if settings.ENVIRONMENT == "development":
                         logger.warning("DEV MODE: Dropping and recreating tables for schema sync.")
                         await conn.run_sync(SQLModel.metadata.drop_all)
@@ -282,19 +317,6 @@ class PostgresDatabase:
     async def get_db_session(self) -> AsyncGenerator[AsyncSession, None]:
         async with self.get_session() as session:
             yield session
-
-    async def health_check(self) -> Dict[str, Any]:
-        start_time = datetime.utcnow()
-        status = {"status": "error", "message": "", "details": {}}
-        try:
-            async with self.async_session_maker() as session:
-                await session.execute(text("SELECT 1"))
-            end_time = datetime.utcnow()
-            response_time = (end_time - start_time).total_seconds() * 1000
-            status.update({"status": "ok", "message": "Database connection successful", "details": {"response_time_ms": round(response_time, 2)}})
-        except Exception as e:
-            status.update({"message": str(e)})
-        return status
 
 postgres_db = PostgresDatabase()
 
@@ -354,7 +376,7 @@ class Report(SQLModel, table=True):
     target_brand: Optional[str] = Field(default=None)
     status: ReportStatus = Field(default=ReportStatus.DRAFT, sa_column=Column(TEXT, nullable=False))
     extracted_file_context: Optional[str] = Field(default=None, sa_column=Column(TEXT))
-    created_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), server_default=func.now(), nullable=False))
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime(timezone=True), server_default=func.now(), nullable=False))
     updated_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False))
     user_id: int = Field(foreign_key="user.id")
 
@@ -412,7 +434,7 @@ class ReportRead(SQLModel):
     created_at: datetime
     updated_at: datetime
     user_id: int
-    analysis: Optional[ReportAnalysis] = None
+    analysis: Optional["ReportAnalysis"] = None
     culture_clashes: List[CultureClash] = []
     untapped_growths: List[UntappedGrowth] = []
 
@@ -441,12 +463,10 @@ File: backend/src/api/v1/auth.py
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Header
 from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
-from typing import Annotated, Optional, Dict, Any
-from sqlmodel import select, SQLModel
+from typing import Annotated, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from urllib.parse import urlencode
 import httpx
-from jose import jwt
 from loguru import logger
 
 from src.core.security import (
@@ -487,7 +507,6 @@ GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 GOOGLE_SCOPES = "openid email profile"
-
 
 # --- Helper Function ---
 async def create_user_if_not_exists(session: AsyncSession, user_data: Dict[str, Any]) -> models.User:
@@ -543,7 +562,7 @@ async def login_for_access_token(
             {"WWW-Authenticate": "Bearer"},
         )
     
-    token_data = {"sub": user.email}
+    token_data = {"sub": user.email, "full_name": user.full_name}
     return Token(
         access_token=create_access_token(data=token_data),
         refresh_token=create_refresh_token(data=token_data),
@@ -563,8 +582,9 @@ async def refresh_access_token(
     if not user:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found")
 
+    new_token_data = {"sub": user.email, "full_name": user.full_name}
     return TokenRefreshResponse(
-        access_token=create_access_token(data={"sub": user.email}),
+        access_token=create_access_token(data=new_token_data),
         token_type="bearer"
     )
 
@@ -585,7 +605,7 @@ async def google_authorize(request: Request):
 
 @router.get("/google/callback", tags=["auth"], response_class=RedirectResponse)
 async def google_callback(
-    request: Request, code: str, session: AsyncSession = Depends(get_session)
+    request: Request, code: str, session: DBSession
 ):
     """Handles the callback from Google, exchanges code for token, and gets user info."""
     redirect_uri = f"{str(request.base_url).rstrip('/')}/api/v1/auth/google/callback"
@@ -621,7 +641,7 @@ async def google_callback(
 
     user = await create_user_if_not_exists(session, {"email": email, "full_name": user_info.get("name")})
     
-    access_token = create_access_token(data={"sub": user.email})
+    access_token = create_access_token(data={"sub": user.email, "full_name": user.full_name})
     refresh_token = create_refresh_token(data={"sub": user.email})
 
     params = urlencode({"access_token": access_token, "refresh_token": refresh_token})
@@ -670,7 +690,7 @@ class HealthCheck(BaseModel):
     summary="Perform a Health Check",
     description="Checks the operational status of the API service.",
 )
-def health_check(app_version: str = "0.1.0"):
+def health_check(app_version: str = "1.0.0"):
     return HealthCheck(status="ok", version=app_version)-e 
 -e
 
@@ -692,97 +712,137 @@ File: backend/src/api/v1/utils.py
 from fastapi import APIRouter, Query, HTTPException, status
 from fastapi.responses import RedirectResponse
 import httpx
+from typing import Optional
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, urlencode
 from loguru import logger
 
+from src.services.search import find_official_website
+from src.core.settings import get_settings
+
 router = APIRouter()
+settings = get_settings()
+
+async def fetch_with_scraper(client: httpx.AsyncClient, url: str) -> httpx.Response:
+    """Fetches a URL using ScraperAPI to bypass blocking."""
+    if not settings.SCRAPER_API_KEY or settings.SCRAPER_API_KEY == "YOUR_SCRAPER_API_KEY_HERE":
+        logger.warning("ScraperAPI key not configured. Attempting direct request.")
+        return await client.get(url, timeout=10)
+
+    logger.info(f"Using ScraperAPI for URL: {url}")
+    scraper_url = "http://api.scraperapi.com"
+    params = {
+        'api_key': settings.SCRAPER_API_KEY,
+        'url': url
+    }
+    return await client.get(scraper_url, params=params, timeout=30)
+
+async def find_favicon_url(url: str, client: httpx.AsyncClient) -> Optional[str]:
+    """Helper to find the favicon URL."""
+    base_url = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+    ico_url = urljoin(base_url, "/favicon.ico")
+    
+    try:
+        ico_check = await client.head(ico_url, timeout=5)
+        if ico_check.status_code == 200 and 'image' in ico_check.headers.get('content-type', ''):
+            logger.info(f"Found favicon for {url} at default /favicon.ico")
+            return ico_url
+    except httpx.RequestError:
+        pass
+
+    logger.info(f"Checking HTML for favicon link in {url}")
+    try:
+        response = await client.get(url, timeout=10)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 403:
+            logger.warning(f"Direct access to {url} forbidden (403). Retrying with scraper API.")
+            response = await fetch_with_scraper(client, url)
+            response.raise_for_status()
+        else:
+            raise
+    
+    soup = BeautifulSoup(response.text, "html.parser")
+    
+    icon_rels = ["icon", "shortcut icon", "apple-touch-icon"]
+    icon_link = None
+    for rel in icon_rels:
+        icon_link = soup.find("link", rel=rel)
+        if icon_link:
+            break
+
+    if icon_link and icon_link.has_attr("href"):
+        favicon_href = icon_link["href"]
+        favicon_url = urljoin(str(response.url), favicon_href)
+        logger.success(f"Successfully found favicon for {url} at {favicon_url}")
+        return favicon_url
+    
+    return None
 
 @router.get("/favicon", response_class=RedirectResponse, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
-async def get_favicon(url: str = Query(...)):
-    """
-    Finds and redirects to the favicon for a given URL.
-    """
+async def get_favicon(brand_name: str = Query(..., alias="brandName")) -> RedirectResponse:
+    """Finds the official website for a brand, then finds and redirects to its favicon."""
+    logger.info(f"Initiating favicon search for brand: '{brand_name}'")
+
+    url = await find_official_website(brand_name)
+    if not url:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Could not find an official website for '{brand_name}'.")
+
     if not url.startswith('http'):
         url = 'https://' + url
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+
+    async with httpx.AsyncClient(follow_redirects=True, headers=headers) as client:
         try:
-            # 1. First, try the default /favicon.ico path
-            base_url = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
-            ico_url = urljoin(base_url, "/favicon.ico")
-            
-            ico_check = await client.head(ico_url)
-            if ico_check.status_code == 200 and 'image' in ico_check.headers.get('content-type', ''):
-                logger.info(f"Found favicon for {url} at default /favicon.ico")
-                return RedirectResponse(url=ico_url)
-
-            # 2. If not found, fetch the page and parse HTML for <link> tags
-            logger.info(f"Checking HTML for favicon link in {url}")
-            response = await client.get(url)
-            response.raise_for_status()
-
-            soup = BeautifulSoup(response.text, "lxml")
-            
-            # Prioritized list of rel attributes
-            icon_rels = ["icon", "shortcut icon", "apple-touch-icon"]
-            icon_link = None
-            for rel in icon_rels:
-                icon_link = soup.find("link", rel=rel)
-                if icon_link:
-                    break
-
-            if icon_link and icon_link.has_attr("href"):
-                favicon_href = icon_link["href"]
-                # Resolve relative URLs
-                favicon_url = urljoin(response.url, favicon_href)
-                logger.success(f"Successfully found favicon for {url} at {favicon_url}")
+            favicon_url = await find_favicon_url(url, client)
+            if favicon_url:
                 return RedirectResponse(url=favicon_url)
             
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Favicon not found in HTML or at default location.")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Favicon not found in HTML or at default location for the discovered website.")
 
         except httpx.RequestError as e:
-            logger.warning(f"Could not fetch URL {url}: {e}")
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Could not fetch the provided URL: {e}")
+            logger.warning(f"Could not fetch discovered URL {url} for brand '{brand_name}': {e}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Could not fetch the discovered website URL: {e}")
         except Exception as e:
-            logger.error(f"An unexpected error occurred while fetching favicon for {url}: {e}")
+            logger.error(f"An unexpected error occurred while fetching favicon for {brand_name}: {e}")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An internal error occurred.")-e 
 -e
 
 File: backend/src/api/v1/reports.py
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
-from typing import List, Optional
+from typing import List, Optional, AsyncGenerator
 from sqlmodel import select, SQLModel
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
-import httpx
 from datetime import datetime
-from fastapi.responses import StreamingResponse
-import asyncio
+from fastapi.responses import StreamingResponse, Response
 import json
+import asyncio
+import google.generativeai as genai
 
-from src.db.postgresql import get_session
+from src.db.postgresql import get_session, postgres_db
 from src.db import models
+from src.core.settings import get_settings
 from src.api.v1.auth import get_current_user
-from src.services.report_generator import (
-    get_corporate_profile_via_search,
-    get_cultural_profile_via_qloo,
-    calculate_affinity_overlap,
-    find_culture_clashes,
-    find_untapped_growth,
-    generate_llm_insights,
-    generate_chat_response
-)
+from src.services.react_agent import AlloyReActAgent
 from src.services.docling import process_document_with_docling
+from src.services.report_generator import generate_chat_response
+from src.services.pdf_generator import create_report_pdf
 from loguru import logger
 
 router = APIRouter()
+settings = get_settings()
+genai.configure(api_key=settings.GEMINI_API_KEY)
 
+# --- Pydantic Models for API ---
 class ReportGeneratePayload(SQLModel):
     acquirer_brand: str
     target_brand: str
     title: str
-    context: Optional[str] = None # This will now only be for user notes
+    context: Optional[str] = None
     use_grounding: bool = False
 
 class DraftReportResponse(SQLModel):
@@ -801,6 +861,58 @@ class FileUploadResponse(SQLModel):
     size_in_bytes: int
     message: str = "File processed successfully."
 
+# --- Helper Functions ---
+async def mark_report_as_failed(report_id: int) -> None:
+    try:
+        async with postgres_db.get_session() as session:
+            report = await session.get(models.Report, report_id)
+            if report and report.status == models.ReportStatus.PENDING:
+                report.status = models.ReportStatus.FAILED
+                session.add(report)
+                await session.commit()
+                logger.info(f"Successfully marked report {report_id} as FAILED.")
+    except Exception as e:
+        logger.error(f"Could not mark report {report_id} as FAILED: {e}")
+
+async def synthesize_final_report(agent_data: dict) -> dict:
+    """Takes the agent's gathered data and synthesizes the final report with an LLM call."""
+    logger.info("Synthesizing final report from agent data.")
+    model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
+    
+    prompt = f"""
+    You are a senior M&A analyst. You have been provided with raw data from your junior research team.
+    Your task is to synthesize this data into a final, professional due diligence report.
+
+    **RAW DATA:**
+    ```json
+    {json.dumps(agent_data, indent=2)}
+    ```
+
+    **YOUR TASK:**
+    Based *only* on the raw data provided, generate a complete report as a single JSON object with the following keys:
+    - "cultural_compatibility_score": A float between 0 and 100. Base this on the affinity_overlap_score and the severity of clashes. A high overlap and low severity clashes should result in a high score.
+    - "affinity_overlap_score": A float, taken directly from the 'qloo_analysis'.
+    - "brand_archetype_summary": An object with "acquirer_archetype" and "target_archetype" strings. Deduce these from their respective profiles.
+    - "strategic_summary": A string providing a concise, executive-level overview of the findings, including risks and opportunities.
+    - "culture_clashes": A list of objects, each with "topic" (string), "description" (string), and "severity" ('LOW', 'MEDIUM', or 'HIGH'). Derive these from the 'unique_tastes' in the Qloo analysis.
+    - "untapped_growths": A list of objects, each with "description" (string) and "potential_impact_score" (integer 1-10). Derive these from the 'shared_affinities' in the Qloo analysis.
+
+    Return ONLY the final JSON object.
+    """
+    
+    try:
+        response = await model.generate_content_async(prompt, generation_config={"response_mime_type": "application/json"})
+        return json.loads(response.text)
+    except Exception as e:
+        logger.error(f"Final report synthesis failed: {e}")
+        return {
+            "strategic_summary": "Analysis failed during final synthesis.", "cultural_compatibility_score": 0.0,
+            "affinity_overlap_score": agent_data.get('qloo_analysis', {}).get('affinity_overlap_score', 0.0),
+            "brand_archetype_summary": {"acquirer_archetype": "N/A", "target_archetype": "N/A"},
+            "culture_clashes": [], "untapped_growths": []
+        }
+
+# --- API Endpoints ---
 @router.post("/draft", response_model=DraftReportResponse, status_code=status.HTTP_201_CREATED)
 async def create_draft_report(session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     logger.info(f"User {current_user.email} creating new draft report.")
@@ -812,175 +924,140 @@ async def create_draft_report(session: AsyncSession = Depends(get_session), curr
     return new_report
 
 @router.post("/{report_id}/upload_context_file", response_model=FileUploadResponse)
-async def upload_context_file(
-    report_id: int, 
-    file: UploadFile = File(...), 
-    session: AsyncSession = Depends(get_session), 
-    current_user: models.User = Depends(get_current_user)
-):
-    logger.info(f"User {current_user.email} uploading file '{file.filename}' for report {report_id}")
+async def upload_context_file(report_id: int, file: UploadFile = File(...), session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     report = await session.get(models.Report, report_id)
     if not report or report.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found or access denied.")
-
-    # Process file using the Docling service
     extracted_text = await process_document_with_docling(file)
-
-    # Save extracted text to the report
     report.extracted_file_context = extracted_text
     session.add(report)
     await session.commit()
-
-    logger.success(f"Saved extracted context from '{file.filename}' to report {report_id}")
-    return FileUploadResponse(
-        filename=file.filename,
-        content_type=file.content_type,
-        size_in_bytes=file.size
-    )
+    return FileUploadResponse(filename=file.filename, content_type=file.content_type or "application/octet-stream", size_in_bytes=file.size)
 
 @router.post("/{report_id}/generate")
-async def generate_full_report_stream(
-    report_id: int, payload: ReportGeneratePayload, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)
-):
+async def generate_full_report_stream(report_id: int, payload: ReportGeneratePayload, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     
-    async def event_generator():
-        def yield_event(data: dict):
-            return f"data: {json.dumps(data)}\n\n"
+    async def event_generator() -> AsyncGenerator[str, None]:
+        def format_sse_event(data: dict) -> str:
+            raw_status = data.get("status")
+            if raw_status in ["action", "observation", "thinking"]: return ""
+            event_data = {"payload": data.get("payload")}
+            if raw_status == "source": event_data['status'] = 'source'
+            elif raw_status == "thought": event_data['status'] = 'reasoning'; event_data['message'] = data.get("message")
+            elif raw_status == "complete": return "" 
+            elif raw_status == "error": event_data['status'] = 'error'; event_data['message'] = data.get("message")
+            else:
+                action_payload = data.get('payload', {}); tool_name = action_payload.get('tool_name')
+                if 'qloo' in tool_name: event_data['status'] = 'analysis'; event_data['message'] = "Performing comparative cultural analysis..."
+                elif 'web_search' in tool_name: event_data['status'] = 'search'; event_data['message'] = f"Researching: {action_payload.get('parameters', {}).get('query')}"
+                else: event_data['status'] = 'info'; event_data['message'] = data.get("message")
+            return f"data: {json.dumps(event_data)}\n\n"
 
-        logger.info(f"User {current_user.email} starting stream generation for draft ID: {report_id}")
         report = None
-        
+        generation_succeeded = False
         try:
             report = await session.get(models.Report, report_id)
             if not report or report.user_id != current_user.id or report.status != models.ReportStatus.DRAFT:
-                yield yield_event({"status": "error", "message": "Draft report not found or has been generated."})
-                return
-
-            report.acquirer_brand = payload.acquirer_brand
-            report.target_brand = payload.target_brand
-            report.title = payload.title
-            report.status = models.ReportStatus.PENDING
-            session.add(report)
-            await session.commit()
-            yield yield_event({"status": "info", "message": f"Starting analysis for {payload.acquirer_brand} vs. {payload.target_brand}"})
-
-            yield yield_event({"status": "search", "message": f"Researching Acquirer: {payload.acquirer_brand}"})
-            acquirer_search_result = await get_corporate_profile_via_search(report.acquirer_brand)
-            acquirer_profile = acquirer_search_result["context_str"]
-            acquirer_sources = acquirer_search_result.get("sources", [])
-            for source in acquirer_sources:
-                yield yield_event({"status": "source", "payload": source})
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Report not found or cannot be generated.")
             
-            yield yield_event({"status": "search", "message": f"Researching Target: {payload.target_brand}"})
-            target_search_result = await get_corporate_profile_via_search(report.target_brand)
-            target_profile = target_search_result["context_str"]
-            target_sources = target_search_result.get("sources", [])
-            for source in target_sources:
-                yield yield_event({"status": "source", "payload": source})
+            report.acquirer_brand, report.target_brand, report.title, report.status = payload.acquirer_brand, payload.target_brand, payload.title, models.ReportStatus.PENDING
+            session.add(report); await session.commit()
+            yield f"data: {json.dumps({'status': 'info', 'message': f'Starting analysis for {payload.acquirer_brand} vs. {payload.target_brand}'})}\n\n"
 
-            yield yield_event({"status": "qloo", "message": "Analyzing cultural DNA via Qloo API"})
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                acquirer_qloo_data, target_qloo_data = await asyncio.gather(
-                    get_cultural_profile_via_qloo(acquirer_profile, report.acquirer_brand, client),
-                    get_cultural_profile_via_qloo(target_profile, report.target_brand, client)
+            agent = AlloyReActAgent(report.acquirer_brand, report.target_brand, (report.extracted_file_context or "") + "\n" + (payload.context or ""))
+            async for event in agent.run_stream():
+                sse_event = format_sse_event(event)
+                if sse_event: yield sse_event
+                if event.get("status") == "complete": break
+            
+            if not agent.final_data: raise Exception("Agent failed to gather data.")
+
+            yield f"data: {json.dumps({'status': 'synthesis', 'message': 'Synthesizing final report...'})}\n\n"
+            final_report = await synthesize_final_report(agent.final_data)
+
+            yield f"data: {json.dumps({'status': 'saving', 'message': 'Saving final analysis to database'})}\n\n"
+            async with postgres_db.get_session() as save_session:
+                stmt = select(models.Report).options(selectinload(models.Report.analysis)).where(models.Report.id == report_id)
+                result = await save_session.execute(stmt)
+                save_report = result.scalar_one_or_none()
+                if not save_report: raise Exception("Report not found during save.")
+                if save_report.analysis: await save_session.delete(save_report.analysis); await save_session.flush()
+                
+                # CORE FIX: Explicitly serialize dictionary/list fields to JSON strings
+                analysis = models.ReportAnalysis(
+                    report_id=save_report.id,
+                    cultural_compatibility_score=final_report.get('cultural_compatibility_score', 0.0),
+                    affinity_overlap_score=final_report.get('affinity_overlap_score', 0.0),
+                    brand_archetype_summary=json.dumps(final_report.get('brand_archetype_summary', {})),
+                    strategic_summary=final_report.get('strategic_summary', 'Analysis failed.'),
+                    search_sources=agent.all_sources.get('search_sources', []),
+                    acquirer_sources=agent.all_sources.get('acquirer_sources', []),
+                    target_sources=agent.all_sources.get('target_sources', [])
                 )
+                save_session.add(analysis)
 
-            affinity_score = calculate_affinity_overlap(acquirer_qloo_data, target_qloo_data)
-            clashes = find_culture_clashes(acquirer_qloo_data, target_qloo_data)
-            opportunities = find_untapped_growth(acquirer_qloo_data, target_qloo_data)
-            acquirer_tastes_str = ", ".join([item['name'] for item in acquirer_qloo_data[:20]])
-            target_tastes_str = ", ".join([item['name'] for item in target_qloo_data[:20]])
-
-            # Combine contexts
-            user_notes = payload.context or ""
-            file_context = report.extracted_file_context or ""
-            full_user_context = f"USER NOTES:\n{user_notes}\n\nDOCUMENT CONTEXT:\n{file_context}".strip()
+                for clash in final_report.get('culture_clashes', []): save_session.add(models.CultureClash(report_id=save_report.id, **clash))
+                for growth in final_report.get('untapped_growths', []): save_session.add(models.UntappedGrowth(report_id=save_report.id, **growth))
+                
+                save_report.status = models.ReportStatus.COMPLETED
+                save_session.add(save_report)
+                await save_session.commit()
+                generation_succeeded = True
             
-            yield yield_event({"status": "synthesis", "message": "Synthesizing strategic insights with Gemini"})
-            llm_insights = await generate_llm_insights(
-                acquirer_brand=report.acquirer_brand, target_brand=report.target_brand,
-                acquirer_profile=acquirer_profile, target_profile=target_profile,
-                acquirer_tastes=acquirer_tastes_str, target_tastes=target_tastes_str,
-                use_grounding=payload.use_grounding, user_context=full_user_context
-            )
-            
-            yield yield_event({"status": "saving", "message": "Saving final analysis to database"})
-            analysis = models.ReportAnalysis(
-                report_id=report.id,
-                cultural_compatibility_score=affinity_score,
-                affinity_overlap_score=affinity_score,
-                brand_archetype_summary=llm_insights['brand_archetype_summary'],
-                strategic_summary=llm_insights['strategic_summary'],
-                search_sources=llm_insights.get('sources', []),
-                acquirer_sources=acquirer_sources,
-                target_sources=target_sources
-            )
-            session.add(analysis)
-            for clash in clashes: session.add(models.CultureClash(report_id=report.id, **clash))
-            for opportunity in opportunities: session.add(models.UntappedGrowth(report_id=report.id, **opportunity))
-            
-            report.status = models.ReportStatus.COMPLETED
-            session.add(report)
-            await session.commit()
-            logger.success(f"Streamed Report {report.id} completed successfully.")
-
-            yield yield_event({"status": "complete", "message": "Report generated successfully!", "reportId": report_id})
-
+            yield f"data: {json.dumps({'status': 'complete', 'message': 'Report generated successfully!', 'payload': {'reportId': report_id}})}\n\n"
         except Exception as e:
-            logger.error(f"Stream generation failed for report {report_id}: {e}", exc_info=True)
-            if report:
-                report.status = models.ReportStatus.FAILED
-                session.add(report)
-                await session.commit()
-            yield yield_event({"status": "error", "message": f"An unexpected error occurred: {e}"})
-    
+            error_message = str(e); logger.error(f"Error in report generation stream {report_id}: {error_message}", exc_info=True)
+            yield f"data: {json.dumps({'status': 'error', 'message': f'An unexpected error occurred: {error_message}'})}\n\n"
+        finally:
+            if not generation_succeeded and report: await mark_report_as_failed(report_id)
+
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
-
-@router.post("/{report_id}/chat", response_class=StreamingResponse)
-async def chat_with_report(report_id: int, payload: ReportChatPayload, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
-    report = await session.get(models.Report, report_id)
-    if not report or report.user_id != current_user.id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found.")
-    logger.info(f"User {current_user.email} is chatting with report {report_id}.")
-    async def stream_response():
-        try:
-            async for chunk in generate_chat_response(payload.query, payload.context):
-                yield chunk
-        except Exception as e:
-            logger.error(f"Error during chat stream for report {report_id}: {e}")
-            yield "Sorry, I encountered an error while processing your request."
-    return StreamingResponse(stream_response(), media_type="text/event-stream")
+@router.get("/{report_id}/download-pdf")
+async def download_report_pdf(report_id: int, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
+    statement = select(models.Report).where(models.Report.id == report_id, models.Report.user_id == current_user.id).options(selectinload(models.Report.analysis), selectinload(models.Report.culture_clashes), selectinload(models.Report.untapped_growths))
+    result = await session.execute(statement)
+    report = result.scalar_one_or_none()
+    if not report or report.status != models.ReportStatus.COMPLETED: raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found or not complete.")
+    try:
+        pdf_bytes = create_report_pdf(report)
+        filename = f"Alloy_Report_{report.acquirer_brand}_vs_{report.target_brand}.pdf"
+        return Response(content=pdf_bytes, media_type="application/pdf", headers={'Content-Disposition': f'attachment; filename="{filename}"'})
+    except Exception as e:
+        logger.error(f"Failed to generate PDF for report {report_id}: {e}", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to generate PDF report.")
 
 @router.get("/", response_model=List[models.ReportRead])
 async def get_reports(session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
-    statement = (select(models.Report).where(models.Report.user_id == current_user.id, models.Report.status != models.ReportStatus.DRAFT).order_by(models.Report.created_at.desc()).options(selectinload(models.Report.analysis), selectinload(models.Report.culture_clashes), selectinload(models.Report.untapped_growths)))
+    statement = select(models.Report).where(models.Report.user_id == current_user.id, models.Report.status != models.ReportStatus.DRAFT).order_by(models.Report.created_at.desc()).options(selectinload(models.Report.analysis), selectinload(models.Report.culture_clashes), selectinload(models.Report.untapped_growths))
     result = await session.execute(statement)
-    reports = result.scalars().all()
-    return reports
+    return list(result.scalars().all())
 
 @router.get("/{report_id}", response_model=models.ReportRead)
 async def get_report(report_id: int, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
-    statement = (select(models.Report).where(models.Report.id == report_id, models.Report.user_id == current_user.id).options(selectinload(models.Report.analysis), selectinload(models.Report.culture_clashes), selectinload(models.Report.untapped_growths)))
+    statement = select(models.Report).where(models.Report.id == report_id, models.Report.user_id == current_user.id).options(selectinload(models.Report.analysis), selectinload(models.Report.culture_clashes), selectinload(models.Report.untapped_growths))
     result = await session.execute(statement)
     report = result.scalar_one_or_none()
-    if not report or report.status == models.ReportStatus.DRAFT:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
+    if not report or (report.status == models.ReportStatus.DRAFT and report.user_id != current_user.id): raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found")
     return report
 
 @router.delete("/{report_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_report(report_id: int, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
-    logger.info(f"User {current_user.email} attempting to delete report {report_id}")
-    statement = select(models.Report).where(models.Report.id == report_id, models.Report.user_id == current_user.id)
-    result = await session.execute(statement)
-    report_to_delete = result.scalar_one_or_none()
-    if not report_to_delete:
-        logger.warning(f"Delete failed: Report {report_id} not found or user {current_user.email} does not have permission.")
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
-    await session.delete(report_to_delete)
-    await session.commit()
-    logger.success(f"Successfully deleted report {report_id} for user {current_user.email}")
-    return-e 
+    report_to_delete = await session.get(models.Report, report_id)
+    if not report_to_delete or report_to_delete.user_id != current_user.id: raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found")
+    await session.delete(report_to_delete); await session.commit()
+
+@router.post("/{report_id}/chat", response_class=StreamingResponse)
+async def chat_with_report(report_id: int, payload: ReportChatPayload, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
+    report = await session.get(models.Report, report_id)
+    if not report or report.user_id != current_user.id: raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found.")
+    async def stream_response():
+        try:
+            async for chunk in generate_chat_response(payload.query, payload.context): yield chunk
+        except Exception as e:
+            logger.error(f"Error during chat stream for report {report_id}: {e}")
+            yield "Sorry, I encountered an error while processing your request."
+    return StreamingResponse(stream_response(), media_type="text/event-stream")-e 
 -e
 
 File: backend/src/api/__init__.py
@@ -1018,10 +1095,257 @@ app.add_middleware(
 app.include_router(api_router, prefix="/api/v1", tags=["System"])-e 
 -e
 
+File: backend/src/services/react_agent.py
+import httpx
+import google.generativeai as genai
+from typing import List, Dict, Any, AsyncGenerator, Optional, Tuple, Set
+from loguru import logger
+import json
+
+from src.core.settings import get_settings
+from src.services.search import web_search
+
+settings = get_settings()
+genai.configure(api_key=settings.GEMINI_API_KEY)
+
+# --- Agent Tool Helpers ---
+
+async def _summarize_with_gemini(context: str, query: str) -> str:
+    """Summarizes a text context using Gemini, tailored to a specific query."""
+    if not context.strip():
+        return "No information found from web search."
+    try:
+        model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
+        prompt = f"""
+        Based *only* on the following text from a web search, provide a concise summary that directly answers the user's query.
+        Focus on the most relevant facts, entities, and data points.
+
+        USER QUERY: "{query}"
+
+        SEARCH RESULTS CONTEXT:
+        ---
+        {context}
+        ---
+
+        CONCISE SUMMARY FOR AGENT:
+        """
+        response = await model.generate_content_async(prompt)
+        return response.text.strip()
+    except Exception as e:
+        logger.error(f"Error during Gemini summarization: {e}")
+        return "Could not summarize the search results due to an internal error."
+
+async def _find_qloo_id(client: httpx.AsyncClient, brand_name: str) -> Optional[Tuple[str, str]]:
+    """Finds the Qloo ID and canonical name for a brand."""
+    headers = {"x-api-key": settings.QLOO_API_KEY}
+    brand_variations = list(set([
+        brand_name,
+        brand_name.replace("Company", "").replace("Inc.", "").replace("Corp.", "").strip(),
+        brand_name.split(' ')[0],
+    ]))
+
+    for variation in brand_variations:
+        if not variation: continue
+        try:
+            search_payload = {"query": variation, "filter": {"type": "urn:entity:brand"}, "take": 1}
+            search_url = "https://hackathon.api.qloo.com/v2/search"
+            resp = await client.post(search_url, json=search_payload, headers=headers)
+            if resp.status_code != 200: continue
+            results = resp.json().get("data", [])
+            if results:
+                qloo_id, found_name = results[0].get("id"), results[0].get("name")
+                logger.success(f"Found Qloo match for '{variation}': '{found_name}' (ID: {qloo_id})")
+                return qloo_id, found_name
+        except Exception:
+            logger.warning(f"Qloo ID search failed for variation '{variation}'.")
+    return None
+
+async def _get_qloo_tastes(client: httpx.AsyncClient, qloo_id: str) -> List[Dict]:
+    """Fetches the top 50 tastes for a given Qloo ID."""
+    try:
+        headers = {"x-api-key": settings.QLOO_API_KEY}
+        insights_payload = {"id": [qloo_id], "take": 50}
+        insights_url = "https://hackathon.api.qloo.com/v2/insights"
+        resp = await client.post(insights_url, json=insights_payload, headers=headers)
+        resp.raise_for_status()
+        return resp.json().get("data", [])
+    except Exception as e:
+        logger.error(f"Failed to fetch Qloo tastes for ID {qloo_id}: {e}")
+        return []
+
+# --- Agent Tools ---
+
+async def _web_search_tool(query: str) -> Dict[str, Any]:
+    """Performs a web search, summarizes results, and returns summary and sources."""
+    logger.info(f"AGENT TOOL: Web Search with query: '{query}'")
+    search_result = await web_search(query)
+    summary = await _summarize_with_gemini(search_result['context_str'], query)
+    return {"context_str": summary, "sources": search_result["sources"]}
+
+async def _qloo_comparative_analysis_tool(acquirer_brand_name: str, target_brand_name: str) -> Dict[str, Any]:
+    """Performs a deep cultural comparison and returns a structured dictionary."""
+    logger.info(f"AGENT TOOL: Qloo Comparative Analysis for '{acquirer_brand_name}' vs '{target_brand_name}'")
+    async with httpx.AsyncClient(timeout=45.0) as client:
+        acquirer_info = await _find_qloo_id(client, acquirer_brand_name)
+        target_info = await _find_qloo_id(client, target_brand_name)
+        if not acquirer_info: return {"context_str": f"Error: Could not find acquirer '{acquirer_brand_name}' in Qloo database."}
+        if not target_info: return {"context_str": f"Error: Could not find target '{target_brand_name}' in Qloo database."}
+        acquirer_tastes = await _get_qloo_tastes(client, acquirer_info[0])
+        target_tastes = await _get_qloo_tastes(client, target_info[0])
+    if not acquirer_tastes or not target_tastes: return {"context_str": "Error: Could not retrieve taste data."}
+    acquirer_set, target_set = {t['name'] for t in acquirer_tastes}, {t['name'] for t in target_tastes}
+    shared_tastes, union_size = list(acquirer_set.intersection(target_set)), len(acquirer_set.union(target_set))
+    # CORE FIX: Always return a dictionary with a 'context_str' key.
+    return {"context_str": json.dumps({
+        "affinity_overlap_score": round((len(shared_tastes) / union_size * 100), 2) if union_size > 0 else 0,
+        "shared_affinities_top_5": shared_tastes[:5],
+        "acquirer_unique_tastes_top_5": list(acquirer_set - target_set)[:5],
+        "target_unique_tastes_top_5": list(target_set - acquirer_set)[:5],
+    })}
+
+# --- The Stateful ReAct Agent ---
+class AlloyReActAgent:
+    PROMPT_TEMPLATE = """
+    You are a data-gathering AI assistant for a financial firm.
+    Your only job is to execute a sequence of tool calls to gather information about two companies and their cultural overlap.
+    Do not synthesize, analyze, or generate the final report yourself. Simply gather the data and pass it to the 'finish' tool.
+
+    **TOOLS:**
+    - `web_search(query: str)`: For company profile research.
+    - `qloo_comparative_analysis(acquirer_brand_name: str, target_brand_name: str)`: For cultural data.
+    - `finish(gathered_data: dict)`: Use this ONLY when all data gathering steps are complete. The `gathered_data` parameter must be a JSON object containing keys 'acquirer_profile', 'target_profile', and 'qloo_analysis'.
+
+    **RESPONSE FORMAT:**
+    You MUST respond with a "Thought" and an "Action" in this exact format. The Action MUST be a valid JSON object.
+    **Thought**: [Your reasoning for the next action]
+    **Action**: [A single JSON object for the tool call]
+
+    **EXAMPLE ACTION:**
+    **Action**: {{"tool_name": "web_search", "parameters": {{"query": "Example Inc. company profile"}}}}
+
+    **CURRENT TASK:**
+    Gather data for a report on the acquisition of target **{target_brand}** by acquirer **{acquirer_brand}**.
+    User-provided context: {user_context}
+
+    **COMPLETED STEPS:**
+    {completed_steps}
+
+    Based on the completed steps, what is the next logical data-gathering action?
+    """
+
+    def __init__(self, acquirer_brand: str, target_brand: str, user_context: str | None = None):
+        self.acquirer_brand = acquirer_brand
+        self.target_brand = target_brand
+        self.user_context = user_context or "None"
+        self.model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
+        self.completed_steps: Set[str] = set()
+        self.scratchpad = "" 
+        self.gathered_data = {} 
+        self.final_data = None
+        self.tools = {"web_search": _web_search_tool, "qloo_comparative_analysis": _qloo_comparative_analysis_tool}
+        self.all_sources: Dict[str, List[Dict[str, str]]] = {'acquirer_sources': [], 'target_sources': [], 'search_sources': []}
+
+    def _build_prompt(self) -> str:
+        """Builds the prompt with the current state of completed steps."""
+        completed_steps_str = "\n".join(f"- {step}" for step in sorted(list(self.completed_steps))) or "None"
+        return self.PROMPT_TEMPLATE.format(
+            acquirer_brand=self.acquirer_brand,
+            target_brand=self.target_brand,
+            user_context=self.user_context,
+            completed_steps=completed_steps_str
+        ) + self.scratchpad
+
+    async def run_stream(self) -> AsyncGenerator[Dict[str, Any], None]:
+        max_turns = 6
+        for i in range(max_turns):
+            yield {"status": "thinking", "message": f"Agent reasoning (Step {i+1}/{max_turns})"}
+            
+            prompt = self._build_prompt()
+            response_text = await self._get_llm_response(prompt)
+            
+            if "**Action**:" not in response_text:
+                yield {"status": "thought", "message": response_text.replace("**Thought**:", "").strip()}
+                logger.warning("Agent produced a thought but no action. Ending turn.")
+                continue
+
+            parts = response_text.split("**Action**:", 1)
+            thought = parts[0].replace("**Thought**:", "").strip()
+            action_str = parts[1].strip().replace("```json", "").replace("```", "")
+            yield {"status": "thought", "message": thought}
+            
+            try:
+                action_json = json.loads(action_str)
+                yield {"status": "action", "payload": action_json}
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON parsing error: {e}. Raw action: {action_str}")
+                yield {"status": "error", "message": f"Agent provided invalid JSON: {e}"}
+                observation = f"Error: The provided Action was not valid JSON. Please ensure your Action is a single, correctly formatted JSON object with 'tool_name' and 'parameters' keys. The error was: {e}"
+                self.scratchpad += f"\n**Thought**: {thought}\n**Action**: {action_str}\n**Observation**: {observation}"
+                continue
+
+            tool_name, params = action_json.get("tool_name"), action_json.get("parameters", {})
+            
+            if not tool_name:
+                observation = "Error: Your action JSON is missing the 'tool_name' key."
+            elif tool_name == "finish":
+                self.final_data = params.get("gathered_data", {})
+                yield {"status": "complete"}
+                return
+            elif tool_name not in self.tools:
+                observation = f"Error: Unknown tool '{tool_name}'."
+            else:
+                try:
+                    tool_result = await self.tools[tool_name](**params)
+                    observation = tool_result.get('context_str', f"Tool {tool_name} ran but provided no context.")
+                    
+                    if tool_name == "web_search":
+                        query = params.get('query','').lower()
+                        if self.acquirer_brand.lower() in query:
+                            self.completed_steps.add("searched_acquirer")
+                            self.gathered_data['acquirer_profile'] = observation
+                            self.all_sources['acquirer_sources'].extend(tool_result.get('sources', []))
+                        elif self.target_brand.lower() in query:
+                            self.completed_steps.add("searched_target")
+                            self.gathered_data['target_profile'] = observation
+                            self.all_sources['target_sources'].extend(tool_result.get('sources', []))
+                        
+                        sources = tool_result.get('sources', [])
+                        for source in sources:
+                            yield {"status": "source", "payload": source}
+
+                    elif tool_name == "qloo_comparative_analysis":
+                        self.completed_steps.add("performed_qloo_analysis")
+                        # This can fail if the observation is an error string.
+                        try:
+                            self.gathered_data['qloo_analysis'] = json.loads(observation)
+                        except json.JSONDecodeError:
+                            # Observation is an error message, pass it on.
+                            self.gathered_data['qloo_analysis'] = {"error": observation}
+
+                except Exception as e:
+                    logger.error(f"Error executing tool '{tool_name}': {e}", exc_info=True)
+                    observation = f"Error: {e}"
+
+            self.scratchpad += f"\n**Thought**: {thought}\n**Action**: {json.dumps(action_json)}\n**Observation**: {observation}"
+            yield {"status": "observation", "message": f"Observation from {tool_name}"}
+
+        logger.warning("Agent exceeded maximum turns.")
+        self.final_data = self.gathered_data
+        yield {"status": "complete"}
+
+    async def _get_llm_response(self, prompt) -> str:
+        try:
+            response = await self.model.generate_content_async(prompt)
+            return response.text
+        except Exception as e:
+            logger.error(f"Gemini API call failed: {e}")
+            return f'**Thought**: A critical error occurred. I must finish now.\n**Action**: {json.dumps({"tool_name": "finish", "parameters": {"gathered_data": self.gathered_data}})}'-e 
+-e
+
 File: backend/src/services/docling.py
 from fastapi import UploadFile, HTTPException, status
 from loguru import logger
-import openpyxl
+import openpyxl # type: ignore
 from pypdf import PdfReader
 import io
 
@@ -1035,7 +1359,7 @@ async def process_document_with_docling(file: UploadFile) -> str:
     
     file_bytes = await file.read()
     text_content = ""
-
+    
     try:
         if content_type == "application/pdf":
             reader = PdfReader(io.BytesIO(file_bytes))
@@ -1043,7 +1367,7 @@ async def process_document_with_docling(file: UploadFile) -> str:
                 text_content += page.extract_text() or ""
         
         elif content_type in ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel"]:
-            workbook = openpyxl.load_workbook(io.BytesIO(file_bytes))
+            workbook = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
             for sheet_name in workbook.sheetnames:
                 sheet = workbook[sheet_name]
                 text_content += f"\n--- Sheet: {sheet_name} ---\n"
@@ -1052,7 +1376,7 @@ async def process_document_with_docling(file: UploadFile) -> str:
                     text_content += row_text + "\n"
 
         elif content_type in ["text/plain", "text/markdown"]:
-            text_content = file_bytes.decode("utf-8")
+            text_content = file_bytes.decode("utf-8", errors="ignore")
 
         else:
             raise HTTPException(
@@ -1071,22 +1395,264 @@ async def process_document_with_docling(file: UploadFile) -> str:
         )-e 
 -e
 
+File: backend/src/services/pdf_generator.py
+import google.generativeai as genai
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.units import inch
+from datetime import datetime
+import io
+import json
+from loguru import logger
+
+from src.db import models
+from src.core.settings import get_settings
+from src.services.pdf_template import (
+    get_pdf_styles,
+    create_header,
+    create_title_section,
+    create_key_metrics_table,
+    create_clashes_table,
+    create_growth_table
+)
+
+settings = get_settings()
+genai.configure(api_key=settings.GEMINI_API_KEY)
+
+async def generate_qualitative_summary(report_data: dict) -> dict:
+    """Uses Gemini to generate the strategic summary and brand archetypes."""
+    logger.info("Generating qualitative summaries with Gemini...")
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    
+    # Create a simplified JSON for the LLM prompt, focusing on what it needs
+    prompt_data = {
+        "acquirer_brand": report_data["acquirer_brand"],
+        "target_brand": report_data["target_brand"],
+        "affinity_overlap_score": report_data["affinity_overlap_score"],
+        "top_culture_clashes": [
+            {"topic": c["topic"], "severity": c["severity"]} for c in report_data.get("culture_clashes", [])[:5]
+        ],
+        "top_growth_opportunities": [
+            g["description"] for g in report_data.get("untapped_growths", [])[:5]
+        ]
+    }
+    
+    prompt = f"""
+    You are an expert M&A analyst from a top-tier investment bank.
+    Your task is to write the qualitative sections of a cultural due diligence report based on the provided data points.
+    The tone should be professional, insightful, and data-driven.
+
+    **Instructions:**
+    1.  Write a "Strategic Summary" that synthesizes the provided data into a concise, executive-level overview. Highlight the key risks (from clashes) and opportunities (from growth areas).
+    2.  Write a "Brand Archetype" for both the acquirer and the target. This should be a short, insightful paragraph for each, deducing their brand's 'personality' from the data.
+    3.  Return the output as a single, valid JSON object with two keys: "strategic_summary" and "brand_archetypes". The "brand_archetypes" key should contain an object with "acquirer" and "target" keys.
+
+    **Input Data:**
+    ```json
+    {json.dumps(prompt_data, indent=2)}
+    ```
+
+    **JSON Output:**
+    """
+    
+    try:
+        response = await model.generate_content_async(prompt, generation_config={"response_mime_type": "application/json"})
+        logger.success("Successfully generated qualitative summary from Gemini.")
+        return json.loads(response.text)
+    except Exception as e:
+        logger.error(f"Failed to generate qualitative summary with Gemini: {e}")
+        # Fallback to a default summary in case of LLM failure
+        return {
+            "strategic_summary": "Analysis generated, but AI-powered qualitative summary could not be completed.",
+            "brand_archetypes": {
+                "acquirer": "Data unavailable.",
+                "target": "Data unavailable."
+            }
+        }
+
+def create_report_pdf(report: models.Report, llm_summary: dict) -> bytes:
+    """
+    Assembles the PDF from static templates and LLM-generated content using reportlab.
+    """
+    logger.info(f"Assembling PDF for report {report.id} using ReportLab.")
+    
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer,
+                            rightMargin=0.75*inch,
+                            leftMargin=0.75*inch,
+                            topMargin=0.75*inch,
+                            bottomMargin=1.0*inch) # Increased bottom margin for footer
+    
+    styles = get_pdf_styles()
+    story = []
+
+    # --- Static Header & Title ---
+    story.extend(create_header(styles))
+    story.extend(create_title_section(report, styles))
+    
+    # --- Static Key Metrics Table ---
+    story.extend(create_key_metrics_table(report, doc.width, styles))
+    
+    # --- Dynamic LLM Content ---
+    story.append(Paragraph("Strategic Summary", styles['h2']))
+    story.append(Paragraph(llm_summary.get("strategic_summary", "N/A").replace('\n', '<br/>'), styles['default']))
+    story.append(Spacer(1, 0.3*inch))
+    
+    story.append(Paragraph("Brand Archetypes", styles['h2']))
+    archetypes = llm_summary.get("brand_archetypes", {})
+    story.append(Paragraph(report.acquirer_brand, styles['h3']))
+    story.append(Paragraph(archetypes.get('acquirer', 'N/A'), styles['default']))
+    story.append(Spacer(1, 0.1*inch))
+    story.append(Paragraph(report.target_brand, styles['h3']))
+    story.append(Paragraph(archetypes.get('target', 'N/A'), styles['default']))
+    story.append(Spacer(1, 0.3*inch))
+
+    # --- Static Tables ---
+    story.extend(create_clashes_table(report, doc.width, styles))
+    story.extend(create_growth_table(report, doc.width, styles))
+    
+    # --- Footer ---
+    def on_page(canvas, doc):
+        canvas.saveState()
+        canvas.setFont('Helvetica', 8)
+        canvas.setFillColor(colors.grey)
+        footer_text = f"Report ID: {report.id} | Confidential & Proprietary © {datetime.now().year} Alloy"
+        canvas.drawCentredString(doc.width/2 + doc.leftMargin, 0.5 * inch, footer_text)
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
+    
+    pdf_bytes = buffer.getvalue()
+    buffer.close()
+    logger.success(f"Successfully assembled PDF for report {report.id}.")
+    return pdf_bytes-e 
+-e
+
+File: backend/src/services/pdf_template.py
+from reportlab.platypus import Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib import colors
+from reportlab.lib.units import inch
+from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+
+def get_pdf_styles():
+    """Returns a dictionary of styled reportlab ParagraphStyle objects."""
+    styles = {
+        'default': ParagraphStyle(name='default', fontName='Helvetica', fontSize=10, leading=14),
+        'h1': ParagraphStyle(name='h1', fontName='Helvetica-Bold', fontSize=20, alignment=TA_CENTER, spaceAfter=6),
+        'h2': ParagraphStyle(name='h2', fontName='Helvetica-Bold', fontSize=14, spaceAfter=12, textColor=colors.HexColor('#0d47a1')),
+        'h3': ParagraphStyle(name='h3', fontName='Helvetica-Bold', fontSize=11, spaceAfter=6),
+        'center': ParagraphStyle(name='center', parent=styles.get('default'), alignment=TA_CENTER),
+        'right': ParagraphStyle(name='right', parent=styles.get('default'), alignment=TA_RIGHT),
+        'small_grey': ParagraphStyle(name='small_grey', fontSize=8, fontName='Helvetica', textColor=colors.grey),
+    }
+    return styles
+
+def create_header(styles):
+    """Creates the header section of the PDF."""
+    return [
+        Paragraph("Alloy - Cultural Due Diligence Report", styles['right']),
+        Spacer(1, 0.1 * inch)
+    ]
+
+def create_title_section(report, styles):
+    """Creates the main title section of the PDF."""
+    return [
+        Paragraph(report.title, styles['h1']),
+        Paragraph(f"<i>Generated: {report.created_at.strftime('%B %d, %Y')}</i>", styles['center']),
+        Spacer(1, 0.3 * inch)
+    ]
+
+def create_key_metrics_table(report, doc_width, styles):
+    """Creates the top-line metrics table."""
+    score_data = [
+        [
+            Paragraph(f"<font size=24>{report.analysis.cultural_compatibility_score:.0f}</font>/100", styles['center']),
+            Paragraph(f"<font size=24>{report.analysis.affinity_overlap_score:.1f}%</font>", styles['center'])
+        ],
+        [
+            Paragraph("<b>Cultural Compatibility Score</b>", styles['center']),
+            Paragraph("<b>Audience Affinity Overlap</b>", styles['center'])
+        ]
+    ]
+    table = Table(score_data, colWidths=[doc_width / 2.0, doc_width / 2.0], rowHeights=0.6 * inch)
+    table.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('BOX', (0, 0), (-1, -1), 1, colors.darkgrey),
+        ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.lightgrey),
+    ]))
+    return [table, Spacer(1, 0.3 * inch)]
+
+def create_clashes_table(report, doc_width, styles):
+    """Creates the culture clashes table."""
+    if not report.culture_clashes:
+        return []
+        
+    header = Paragraph("Potential Culture Clashes", styles['h2'])
+    
+    data = [['Topic', 'Description', 'Severity']]
+    for clash in report.culture_clashes:
+        data.append([
+            Paragraph(clash.topic, styles['default']),
+            Paragraph(clash.description, styles['default']),
+            Paragraph(clash.severity.value, styles['default'])
+        ])
+        
+    table = Table(data, colWidths=[doc_width * 0.2, doc_width * 0.6, doc_width * 0.2])
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#263238')), # Dark Blue-Gray
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 10),
+        ('TOPPADDING', (0, 0), (-1, 0), 10),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.HexColor('#f5f5f5'), colors.white]),
+        ('GRID', (0, 0), (-1, -1), 1, colors.lightgrey)
+    ]))
+    return [header, table, Spacer(1, 0.3 * inch)]
+
+def create_growth_table(report, doc_width, styles):
+    """Creates the untapped growth opportunities table."""
+    if not report.untapped_growths:
+        return []
+
+    header = Paragraph("Untapped Growth Opportunities", styles['h2'])
+
+    data = [['Opportunity', 'Potential Impact']]
+    for growth in report.untapped_growths:
+        data.append([
+            Paragraph(growth.description, styles['default']),
+            Paragraph(f"<b>{growth.potential_impact_score}/10</b>", styles['center'])
+        ])
+
+    table = Table(data, colWidths=[doc_width * 0.8, doc_width * 0.2])
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#004d40')), # Dark Teal
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 10),
+        ('TOPPADDING', (0, 0), (-1, 0), 10),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.HexColor('#f5f5f5'), colors.white]),
+        ('GRID', (0, 0), (-1, -1), 1, colors.lightgrey)
+    ]))
+    return [header, table, Spacer(1, 0.3 * inch)]-e 
+-e
+
 File: backend/src/services/report_generator.py
-import httpx
 import google.generativeai as genai
 from typing import List, Dict, Any, AsyncGenerator
 from loguru import logger
 import json
-import asyncio
 
 from src.core.settings import get_settings
-from src.services.search import tavily_search
+from src.services.search import web_search
 
 settings = get_settings()
 genai.configure(api_key=settings.GEMINI_API_KEY)
 QLOO_BASE_URL = "https://hackathon.api.qloo.com"
 
-# ... (get_corporate_profile_via_search and get_cultural_profile_via_qloo are unchanged)
 async def get_corporate_profile_via_search(brand_name: str) -> Dict[str, Any]:
     """
     Performs a Tavily search and returns the entire result object,
@@ -1094,33 +1660,8 @@ async def get_corporate_profile_via_search(brand_name: str) -> Dict[str, Any]:
     """
     logger.info(f"Performing Tavily search for corporate profile of '{brand_name}'")
     query = f"Corporate profile, brand identity, key products, and target audience for '{brand_name}'"
-    search_result = await tavily_search(query)
+    search_result = await web_search(query)
     return search_result
-
-async def get_cultural_profile_via_qloo(corporate_profile: str, brand_name: str, client: httpx.AsyncClient) -> List[Dict]:
-    logger.info(f"Extracting cultural proxies for '{brand_name}'")
-    proxy_extraction_model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
-    prompt = f"From the following text about '{brand_name}', extract up to 5 of the most culturally significant and well-known entities (movies, artists, TV shows, specific well-known product names like 'iPhone' or 'Model S', etc.). Return them as a simple comma-separated list. TEXT: {corporate_profile}"
-    try:
-        response = await proxy_extraction_model.generate_content_async(prompt)
-        proxy_names = [name.strip() for name in response.text.split(',')]
-        logger.success(f"Extracted proxies for '{brand_name}': {proxy_names}")
-    except Exception as e:
-        logger.error(f"Failed to extract proxies for '{brand_name}': {e}")
-        return []
-
-    if not proxy_names: return []
-    payload = {"signal": { "interests": { "entities": { "query": proxy_names } } }, "filter": { "type": "urn:entity:brand" }, "take": 50}
-    insights_endpoint = f"{QLOO_BASE_URL}/v2/insights"
-    headers = {"x-api-key": settings.QLOO_API_KEY}
-    try:
-        logger.info(f"Querying Qloo with proxies for '{brand_name}'")
-        qloo_response = await client.post(insights_endpoint, json=payload, headers=headers)
-        qloo_response.raise_for_status()
-        return qloo_response.json().get('data', [])
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Qloo Insights API error for '{brand_name}' proxies: {e.response.status_code} - {e.response.text}")
-        return []
 
 
 # --- Analysis Functions (Unchanged) ---
@@ -1153,55 +1694,6 @@ def find_untapped_growth(acquirer_data: List[Dict], target_data: List[Dict]) -> 
     return opportunities
 
 
-async def generate_llm_insights(acquirer_brand: str, target_brand: str, acquirer_profile: str, target_profile: str, acquirer_tastes: str, target_tastes: str, use_grounding: bool, user_context: str | None) -> Dict[str, Any]:
-    model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
-    
-    search_results_context = ""
-    search_sources = []
-    grounding_instruction = "Analyze based *only* on the Corporate Profiles, Qloo taste data, and any user-provided context."
-    
-    if use_grounding:
-        logger.info("Internet grounding is enabled. Performing Tavily search...")
-        search_query = f"Cultural compatibility, brand identity, and audience overlap between '{acquirer_brand}' and '{target_brand}'"
-        search_result = await tavily_search(search_query)
-        search_results_context = f"\n**Data Source 3: Current Events & Analysis (from Tavily Search)**\n{search_result['context_str']}\n"
-        search_sources = search_result['sources']
-        grounding_instruction = "Synthesize a comprehensive analysis using all data sources: Corporate Profiles, Qloo taste data, user-provided context, AND the following real-time search results."
-
-    context_section = f"\n**User-Provided Context:**\n{user_context}\n" if user_context else ""
-    
-    prompt = f"""
-    As an expert M&A brand strategist, provide a deep cultural analysis for the acquisition of **{target_brand}** by **{acquirer_brand}**.
-    {grounding_instruction}
-
-    **Data Source 1: Corporate Profiles**
-    - **{acquirer_brand} Profile:** {acquirer_profile}
-    - **{target_brand} Profile:** {target_profile}
-
-    **Data Source 2: Cultural Taste Profiles (from Qloo API via proxy analysis)**
-    - **{acquirer_brand} Audience Tastes:** {acquirer_tastes}
-    - **{target_brand} Audience Tastes:** {target_tastes}
-    {context_section}
-    {search_results_context}
-    **Required Output Format:**
-    Return a single, valid JSON object with exactly two keys: "brand_archetype_summary" and "strategic_summary".
-
-    1.  **brand_archetype_summary (Stringified JSON):** Create a JSON string with keys "acquirer_archetype" and "target_archetype". For each, write a concise, 2-3 sentence paragraph describing the brand's core identity, values, and audience persona. Synthesize this from all available information.
-
-    2.  **strategic_summary (String):** Write a 3-4 sentence high-level executive summary for a board of directors. Synthesize all findings to explain the overall cultural compatibility. Base your assessment on how the corporate identities align and where the cultural tastes overlap or clash. Highlight the primary risks and the most significant strategic opportunities from the combined data. Be decisive and clear.
-    """
-    try:
-        response = await model.generate_content_async(prompt)
-        cleaned_response = response.text.strip().replace('```json', '').replace('```', '')
-        llm_json = json.loads(cleaned_response)
-        # Add sources to the returned dictionary
-        llm_json['sources'] = search_sources
-        return llm_json
-    except Exception as e:
-        logger.error(f"Gemini generation failed: {e}")
-        return {"brand_archetype_summary": '{"acquirer_archetype": "Error generating analysis.", "target_archetype": "Error generating analysis."}', "strategic_summary": "Could not generate AI-powered strategic summary due to an API error.", "sources": []}
-
-# ... (generate_chat_response remains the same)
 async def generate_chat_response(query: str, report_context: str) -> AsyncGenerator[str, None]:
     model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
     prompt = f"""
@@ -1228,11 +1720,20 @@ File: backend/src/services/search.py
 from tavily import TavilyClient
 from src.core.settings import get_settings
 from loguru import logger
-from typing import Dict, List, Any
+from typing import Dict, List, Any, TypedDict, Optional
+import google.generativeai as genai
+from urllib.parse import urlparse
 
 settings = get_settings()
+if settings.GEMINI_API_KEY:
+    genai.configure(api_key=settings.GEMINI_API_KEY)
 
-async def tavily_search(query: str) -> Dict[str, Any]:
+
+class TavilySearchToolOutput(TypedDict):
+    context_str: str
+    sources: List[Dict[str, str]]
+
+async def web_search(query: str) -> TavilySearchToolOutput:
     """
     Performs a search using the Tavily API and returns a structured dictionary
     containing the formatted results for an LLM and a list of sources.
@@ -1271,52 +1772,103 @@ async def tavily_search(query: str) -> Dict[str, Any]:
         return {
             "context_str": f"An error occurred during the search: {str(e)}",
             "sources": []
-        }-e 
+        }
+
+async def find_official_website(brand_name: str) -> Optional[str]:
+    """
+    Uses Gemini to find the most likely official website for a given brand name.
+    """
+    if not settings.GEMINI_API_KEY:
+        logger.warning("Gemini API key is not set. Skipping website search.")
+        return None
+
+    try:
+        model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
+        prompt = f"""
+        You are a research assistant. Your only task is to find the official homepage URL for a given company.
+        Return ONLY the URL and nothing else. Do not add any explanatory text, markdown, or greetings.
+        If you cannot find a definitive official website, return the text "NOT_FOUND".
+
+        Company Name: "{brand_name}"
+        Official URL:
+        """
+        
+        response = await model.generate_content_async(prompt)
+        
+        # CORE FIX: Use a more robust check for safety-blocked responses.
+        # Check if the response is empty and if there are safety ratings indicating a block.
+        if not response.parts and response.prompt_feedback.safety_ratings:
+            logger.warning(f"Gemini response for '{brand_name}' was blocked by safety settings. Ratings: {response.prompt_feedback.safety_ratings}")
+            return None
+
+        url_candidate = response.text.strip()
+        
+        logger.info(f"Gemini proposed URL for '{brand_name}': '{url_candidate}'")
+
+        if "NOT_FOUND" in url_candidate or not url_candidate:
+            logger.warning(f"Gemini could not find a website for '{brand_name}'.")
+            return None
+        
+        parsed_url = urlparse(url_candidate)
+        if parsed_url.scheme and parsed_url.netloc:
+            logger.success(f"Successfully found and validated website for '{brand_name}': {url_candidate}")
+            return url_candidate
+        else:
+            logger.warning(f"Gemini returned an invalid URL format for '{brand_name}': '{url_candidate}'")
+            return None
+
+    except Exception as e:
+        # Catch specific "Invalid operation" error when .text is accessed on an empty response
+        if "Invalid operation" in str(e) and "none were returned" in str(e):
+             logger.warning(f"Gemini returned an empty response for '{brand_name}', likely due to safety filters.")
+             return None
+        logger.error(f"An error occurred during Gemini website search for '{brand_name}': {e}")
+        return None-e 
 -e
 
 File: web/src/types/report.ts
 export interface Report {
-    id: number;
-    title: string;
-    acquirer_brand: string;
-    target_brand: string;
-    status: 'PENDING' | 'COMPLETED' | 'FAILED' | 'DRAFT';
-    created_at: string;
-    updated_at: string;
-    user_id: number;
-    analysis: ReportAnalysis | null;
-    culture_clashes: CultureClash[];
-    untapped_growths: UntappedGrowth[];
-  }
-  
-  export interface ReportAnalysis {
-    id: number;
-    cultural_compatibility_score: number;
-    affinity_overlap_score: number;
-    brand_archetype_summary: string; 
-    strategic_summary: string;
-    report_id: number;
-    search_sources?: { title: string; url: string; }[];
-    acquirer_sources?: { title: string; url: string; }[];
-    target_sources?: { title: string; url: string; }[];
-  }
-  
-  export type ClashSeverity = 'LOW' | 'MEDIUM' | 'HIGH';
-  
-  export interface CultureClash {
-    id: number;
-    topic: string;
-    description: string;
-    severity: ClashSeverity;
-    report_id: number;
-  }
-  
-  export interface UntappedGrowth {
-    id: number;
-    description: string;
-    potential_impact_score: number;
-    report_id: number;
-  }-e 
+  id: number;
+  title: string;
+  acquirer_brand: string;
+  target_brand: string;
+  status: 'PENDING' | 'COMPLETED' | 'FAILED' | 'DRAFT';
+  created_at: string;
+  updated_at: string;
+  user_id: number;
+  analysis: ReportAnalysis | null;
+  culture_clashes: CultureClash[];
+  untapped_growths: UntappedGrowth[];
+}
+
+export interface ReportAnalysis {
+  id: number;
+  cultural_compatibility_score: number;
+  affinity_overlap_score: number;
+  brand_archetype_summary: string; 
+  strategic_summary: string;
+  report_id: number;
+  search_sources?: Array<{ title: string; url: string }>;
+  acquirer_sources?: Array<{ title: string; url: string }>;
+  target_sources?: Array<{ title: string; url: string }>;
+}
+
+export type ClashSeverity = 'LOW' | 'MEDIUM' | 'HIGH';
+
+export interface CultureClash {
+  id: number;
+  topic: string;
+  description: string;
+  severity: ClashSeverity;
+  report_id: number;
+}
+
+export interface UntappedGrowth {
+  id: number;
+  description: string;
+  potential_impact_score: number;
+  report_id: number;
+}-e 
 -e
 
 File: web/src/app/(pages)/(authed)/dashboard/settings/page.tsx
@@ -1355,6 +1907,7 @@ export default function SettingsPage() {
   const { setTheme } = useTheme();
 
   // State for forms
+  //@ts-ignore
   const [fullName, setFullName] = useState(user?.full_name || '');
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -1591,8 +2144,9 @@ import useSWR from 'swr';
 import { useAuth } from '@/components/global/providers';
 import { ReportView, ReportViewSkeleton } from '@/components/report/ReportView';
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
-import { AlertCircle } from 'lucide-react';
+import { AlertCircle, Download } from 'lucide-react';
 import { useParams } from 'next/navigation';
+import { Button } from '@/components/ui/button';
 
 const fetcher = (url: string, token: string) => 
   fetch(url, { headers: { 'Authorization': `Bearer ${token}` } }).then(res => {
@@ -1608,10 +2162,13 @@ const fetcher = (url: string, token: string) =>
 export default function ReportPage() {
     const { id } = useParams<{ id: string }>();
     const { accessToken } = useAuth();
+    const API_URL = process.env.NEXT_PUBLIC_API_URL;
     const { data: report, error, isLoading } = useSWR(
-        accessToken ? [`${process.env.NEXT_PUBLIC_API_URL}/reports/${id}`, accessToken] : null,
+        accessToken ? [`${API_URL}/reports/${id}`, accessToken] : null,
         ([url, token]) => fetcher(url, token)
     );
+
+    const downloadUrl = report && accessToken ? `${API_URL}/reports/${report.id}/download-pdf?token=${accessToken}` : '';
 
     if (isLoading) {
         return <ReportViewSkeleton />;
@@ -1633,8 +2190,16 @@ export default function ReportPage() {
         return null;
     }
 
-    // The main view is now full-height, no container needed here.
-    return <ReportView report={report} />;
+    return (
+        <ReportView report={report}>
+            <Button asChild>
+                <a href={downloadUrl} download>
+                    <Download className="mr-2 h-4 w-4" />
+                    Download PDF
+                </a>
+            </Button>
+        </ReportView>
+    );
 }-e 
 -e
 
@@ -1663,7 +2228,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Skeleton } from "@/components/ui/skeleton";
-import { AlertCircle, CheckCircle, Clock, PlusCircle, Trash2, XCircle } from "lucide-react";
+import { AlertCircle, CheckCircle, Clock, FileText, PlusCircle, Trash2, XCircle } from "lucide-react";
 import { Report } from "@/types/report";
 import { toast } from "sonner";
 import {
@@ -1703,8 +2268,17 @@ const StatusBadge = ({ status }: { status: Report['status'] }) => {
         COMPLETED: { variant: 'default', icon: CheckCircle, text: 'Completed', className: 'bg-green-500/20 text-green-700 border-green-500/30 dark:text-green-400' },
         PENDING: { variant: 'secondary', icon: Clock, text: 'In Progress', className: 'bg-yellow-500/20 text-yellow-700 border-yellow-500/30 dark:text-yellow-400' },
         FAILED: { variant: 'destructive', icon: XCircle, text: 'Failed', className: 'bg-red-500/20 text-red-700 border-red-500/30 dark:text-red-400' },
-    }[status] || { variant: 'secondary', icon: Clock, text: 'Unknown' };
-    return <Badge variant={config.variant} className={config.className}><config.icon className="mr-1 h-3 w-3" />{config.text}</Badge>;
+        DRAFT: { variant: 'outline', icon: FileText, text: 'Draft', className: 'bg-gray-500/20 text-gray-700 border-gray-500/30 dark:text-gray-400' },
+    }[status];
+
+    const Icon = config.icon;
+    
+    return (
+        <Badge variant={config.variant as any} className={config.className}>
+            <Icon className="w-3 h-3 mr-1" />
+            {config.text}
+        </Badge>
+    );
 };
 
 // --- Main Reports Page Component ---
@@ -1894,16 +2468,20 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { signIn } from "next-auth/react";
 import Link from "next/link";
 import { useState, FormEvent } from "react";
-import { FaGoogle as GoogleIcon} from "react-icons/fa";
+import { FaGoogle } from "react-icons/fa";
+import Logo from "@/components/global/Logo";
+import { useAuth } from "@/components/global/providers";
+import { useRouter } from 'next/navigation';
 
 export default function RegisterPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const { login } = useAuth();
+  const router = useRouter();
 
   const handleRegister = async (e: FormEvent) => {
     e.preventDefault();
@@ -1914,40 +2492,49 @@ export default function RegisterPage() {
       return;
     }
 
+    const formData = new URLSearchParams();
+    formData.append('username', email);
+    formData.append('password', password);
+
     try {
+      // 1. Register the user
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/register`, {
         method: 'POST',
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, password, full_name: "" }),
         headers: { 'Content-Type': 'application/json' }
       });
 
       if (!res.ok) {
         const errorData = await res.json();
-        setError(errorData.detail || "Failed to register.");
+        setError(errorData.detail || "Registration failed.");
         return;
       }
       
-      // Automatically sign in the user after successful registration
-      const signInResponse = await signIn("credentials", {
-        email,
-        password,
-        redirect: true,
-        callbackUrl: "/dashboard",
-      });
+      // 2. Log the user in to get tokens
+      const loginRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: formData.toString(),
+      })
 
-      if(signInResponse?.error) {
-        setError("Registration successful, but login failed. Please try logging in manually.");
+      if (!loginRes.ok) {
+        throw new Error("Registration successful, but login failed. Please log in manually.");
       }
 
+      const tokens = await loginRes.json();
+      login(tokens.access_token, tokens.refresh_token);
+      router.push("/dashboard");
+
     } catch (err) {
-      setError("An unexpected error occurred. Please try again.");
-      console.error(err);
+      setError(err instanceof Error ? err.message : "An unexpected error occurred. Please try again.");
     }
   };
+  const googleAuthUrl = `${process.env.NEXT_PUBLIC_API_URL}/auth/google/authorize`;
 
   return (
     <Card className="w-full max-w-sm">
       <CardHeader className="text-center">
+        <Logo className="mx-auto" />
         <CardTitle className="text-2xl">Create an Account</CardTitle>
         <CardDescription>
           Get started with your data-driven Cultural Compatibility Score.
@@ -1997,8 +2584,10 @@ export default function RegisterPage() {
           <div className="flex-grow border-t border-muted" />
         </div>
         <div className="space-y-2">
-          <Button variant="outline" className="w-full" onClick={() => signIn('google')}>
-            <GoogleIcon /> Sign up with Google
+          <Button variant="outline" className="w-full" asChild>
+            <a href={googleAuthUrl}>
+              <FaGoogle className="mr-2" /> Sign up with Google
+            </a>
           </Button>
         </div>
       </CardContent>
@@ -2132,7 +2721,7 @@ export default function LoginPage() {
       router.push("/dashboard");
 
     } catch (err) {
-      setError("An unexpected error occurred. Please try again.");
+      setError(err instanceof Error ? err.message : "An unexpected error occurred. Please try again.");
     }
   };
 
@@ -2191,7 +2780,7 @@ export default function LoginPage() {
       </CardContent>
       <CardFooter className="flex justify-center text-sm">
         <p className="text-muted-foreground">
-          Don't have an account?{" "}
+          Don&apos;t have an account?{" "}
           <Link href="/register" className="text-primary hover:underline font-medium">
             Sign Up
           </Link>
@@ -2207,7 +2796,6 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { AppProviders } from "@/components/global/providers";
-import Footer from "@/components/global/Footer";
 import { Toaster } from "@/components/ui/sonner";
 
 const geistSans = Geist({
@@ -2233,10 +2821,10 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased bg-black`}
+        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
         <AppProviders>{children}</AppProviders>
-      <Toaster />
+      <Toaster richColors position="bottom-right" />
       </body>
     </html>
   );
@@ -7812,7 +8400,7 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
     setIsLoading(true);
 
     const botMessageId = `bot-${Date.now()}`;
-    setMessages(prev => [...prev, { id: botMessageId, sender: 'bot', text: '' }]);
+    setMessages(prev => [...prev, { id: botMessageId, sender: 'bot', text: '...' }]);
 
     try {
         const reportContext = `
@@ -7840,6 +8428,7 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
       
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
+      setMessages(prev => prev.map(msg => msg.id === botMessageId ? { ...msg, text: '' } : msg)); // Clear the "..."
       let done = false;
 
       while (!done) {
@@ -7852,7 +8441,11 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
       }
 
     } catch (error: any) {
-        toast.error("Chat Error", { description: error.message });
+        const errorMessage = "I'm sorry, I encountered an error. Please try again.";
+        toast.error("Chat Error", { description: error.message || "An unknown error occurred." });
+        setMessages(prev => prev.map(msg => 
+            msg.id === botMessageId ? { ...msg, text: errorMessage } : msg
+        ));
         setMessages(prev => prev.filter(msg => msg.id !== botMessageId));
     } finally {
         setIsLoading(false);
@@ -7932,7 +8525,7 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
-} from "@/components/ui/card";
+} from "../ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -7942,57 +8535,35 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from "@/components/ui/table";
-import { AlertTriangle, TrendingUp, Zap, Link as LinkIcon, Globe, Users, Target } from "lucide-react";
+} from "../ui/table";
+import { AlertTriangle, TrendingUp, Zap, Link as LinkIcon, Globe, Users, Target, Trophy, Scale } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Report, ClashSeverity } from "@/types/report";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { AIAnalystChat } from "./AIAnalystChat";
 import Image from "next/image";
 import Link from "next/link";
+import { Bar, BarChart, ResponsiveContainer, XAxis, YAxis, Tooltip, RadialBar, RadialBarChart } from 'recharts';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
+import { ChartContainer } from "../ui/chart";
 import { ScrollArea } from "../ui/scroll-area";
+import { cn } from "@/lib/utils";
+import React from "react";
 
 interface ReportViewProps {
   report: Report;
+  children?: React.ReactNode; // Accept children
 }
 
-const CompanyLogo = ({ url, brandName }: { url: string; brandName: string }) => {
+// --- Helper Components ---
+
+const CompanyLogo = ({ brandName }: { brandName: string }) => {
     const API_URL = process.env.NEXT_PUBLIC_API_URL;
-    // Use the provided URL to fetch the favicon
-    const faviconUrl = `${API_URL}/utils/favicon?url=${encodeURIComponent(url)}`;
+    const faviconUrl = `${API_URL}/utils/favicon?brandName=${encodeURIComponent(brandName)}`;
     return (
         <div className="flex items-center gap-3">
-            <Image 
-                src={faviconUrl} 
-                alt={`${brandName} logo`} 
-                width={40} 
-                height={40} 
-                className="rounded-lg border bg-background p-1" 
-                unoptimized // Necessary for external, dynamic URLs
-            />
+            <Image src={faviconUrl} alt={`${brandName} logo`} width={40} height={40} className="rounded-lg border bg-background p-1" unoptimized priority={false}/>
             <span className="text-xl font-semibold">{brandName}</span>
-        </div>
-    );
-};
-
-const ReportHeader = ({ report }: { report: Report }) => {
-    // FIX: Use the primary source URL for the logo, with a fallback.
-    const acquirerUrl = report.analysis?.acquirer_sources?.[0]?.url || `https://${report.acquirer_brand}.com`;
-    const targetUrl = report.analysis?.target_sources?.[0]?.url || `https://${report.target_brand}.com`;
-
-    return (
-        <div className="space-y-4">
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-                <CompanyLogo url={acquirerUrl} brandName={report.acquirer_brand} />
-                <Zap className="h-8 w-8 text-muted-foreground flex-shrink-0" />
-                <CompanyLogo url={targetUrl} brandName={report.target_brand} />
-            </div>
-            <Card>
-                <CardHeader>
-                    <CardTitle className="text-3xl">{report.title}</CardTitle>
-                    <CardDescription>Cultural due diligence report generated on {new Date(report.created_at).toLocaleString()}.</CardDescription>
-                </CardHeader>
-            </Card>
         </div>
     );
 };
@@ -8009,7 +8580,7 @@ const SeverityBadge = ({ severity }: { severity: ClashSeverity }) => {
 
 const SourcePill = ({ url }: { url: string }) => {
     try {
-        const domain = new URL(url).hostname.replace('www.', '');
+        const domain = new URL(url).hostname?.replace('www.', '');
         const faviconUrl = `https://satori-rho.vercel.app/api/image?url=${url}`;
         return (
             <Link href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-full border bg-secondary/50 px-3 py-1 text-sm text-secondary-foreground transition-colors hover:bg-secondary">
@@ -8022,60 +8593,236 @@ const SourcePill = ({ url }: { url: string }) => {
     }
 }
 
-export const ReportView = ({ report }: ReportViewProps) => {
+// --- Main View Sections ---
+
+const ReportHeader = ({ report, children }: { report: Report, children?: React.ReactNode }) => (
+    <div className="space-y-4">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <CompanyLogo brandName={report.acquirer_brand} />
+            <Zap className="h-8 w-8 text-muted-foreground flex-shrink-0" />
+            <CompanyLogo brandName={report.target_brand} />
+        </div>
+        <Card>
+            <CardHeader className='flex-row items-center justify-between'>
+                <div>
+                    <CardTitle className="text-3xl">{report.title}</CardTitle>
+                    <CardDescription>Cultural due diligence report generated on {new Date(report.created_at).toLocaleString()}.</CardDescription>
+                </div>
+                <div className="flex-shrink-0">
+                    {children}
+                </div>
+            </CardHeader>
+        </Card>
+    </div>
+);
+
+const ScoreAndArchetypes = ({ report }: { report: Report }) => {
     const analysis = report.analysis;
-    const archetypes = analysis ? JSON.parse(analysis.brand_archetype_summary) : {};
+    if (!analysis) return null;
+
+    const archetypes = analysis.brand_archetype_summary ? JSON.parse(analysis.brand_archetype_summary) : {};
+    const chartData = [{ name: 'Score', value: analysis.cultural_compatibility_score, fill: 'hsl(var(--primary))' }];
+    
+    return (
+        <div className="grid md:grid-cols-2 gap-6">
+            <Card>
+                <CardHeader>
+                    <CardTitle className="flex items-center gap-2"><Scale />Cultural Compatibility Score</CardTitle>
+                    <CardDescription>Overall alignment based on audience taste.</CardDescription>
+                </CardHeader>
+                <CardContent className="flex items-center justify-center">
+                    <ChartContainer config={{}} className="mx-auto aspect-square h-[200px] w-[200px]">
+                        <RadialBarChart 
+                            data={chartData} 
+                            startAngle={-270} 
+                            endAngle={90} 
+                            innerRadius="80%" 
+                            outerRadius="100%" 
+                            barSize={30}
+                        >
+                            <RadialBar dataKey="value" background={{ fill: 'hsl(var(--muted))' }} cornerRadius={15} />
+                            <text x="50%" y="50%" textAnchor="middle" dominantBaseline="middle" className="fill-foreground text-5xl font-bold">
+                                {analysis.cultural_compatibility_score.toFixed(0)}
+                            </text>
+                            <text x="50%" y="65%" textAnchor="middle" dominantBaseline="middle" className="fill-muted-foreground text-sm">
+                                / 100
+                            </text>
+                        </RadialBarChart>
+                    </ChartContainer>
+                </CardContent>
+            </Card>
+            <Card>
+                <CardHeader>
+                    <CardTitle>Brand Archetypes</CardTitle>
+                    <CardDescription>AI-generated personalities from taste data.</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4 h-[200px] overflow-y-auto">
+                    <div>
+                        <h3 className="font-semibold text-foreground flex items-center gap-2"><Users className="h-4 w-4" />{report.acquirer_brand}</h3>
+                        <p className="text-muted-foreground text-sm whitespace-pre-wrap">{archetypes.acquirer_archetype || "Analysis not available."}</p>
+                    </div>
+                    <Separator />
+                    <div>
+                        <h3 className="font-semibold text-foreground flex items-center gap-2"><Target className="h-4 w-4" />{report.target_brand}</h3>
+                        <p className="text-muted-foreground text-sm whitespace-pre-wrap">{archetypes.target_archetype || "Analysis not available."}</p>
+                    </div>
+                </CardContent>
+            </Card>
+        </div>
+    );
+};
+
+const AffinityAnalysis = ({ report }: { report: Report }) => {
+    if (!report.analysis) return null
+    const shared = report.untapped_growths.slice(0, 5).map(g => ({ name: g.description.match(/'([^']*)'/)?.[1] || g.description.substring(0,20), score: g.potential_impact_score * 10 }));
+    const acquirer_unique = report.culture_clashes.filter(c => c.description.includes("Acquirer")).slice(0, 5).map(c => ({ name: c.topic, score: 75 }));
+    const target_unique = report.culture_clashes.filter(c => c.description.includes("Target")).slice(0, 5).map(c => ({ name: c.topic, score: 75 }));
+
+    const CustomTooltip = ({ active, payload, label }: any) => {
+        if (active && payload && payload.length) {
+            return (
+                <div className="rounded-lg border bg-background p-2 shadow-sm">
+                    <p className="text-sm font-bold">{label}</p>
+                </div>
+            );
+        }
+        return null;
+    };
+
+    const combinedData = [
+        ...shared.map(item => ({ ...item, type: 'Shared' })),
+        ...acquirer_unique.map(item => ({ ...item, type: 'Acquirer' })),
+        ...target_unique.map(item => ({ ...item, type: 'Target' })),
+    ].sort((a,b) => b.score - a.score);
+
+    const chartData = [
+        { name: report.acquirer_brand, value: acquirer_unique.length, fill: '#3b82f6' },
+        { name: 'Shared Affinity', value: shared.length, fill: 'hsl(var(--primary))' },
+        { name: report.target_brand, value: target_unique.length, fill: '#8b5cf6' },
+    ];
 
     return (
-        <ResizablePanelGroup direction="horizontal" className="h-[calc(100vh-8rem)] w-full rounded-lg border">
-            <ResizablePanel defaultSize={65}>
+        <div className="grid md:grid-cols-2 gap-6">
+            <Card className="col-span-1">
+                <CardHeader>
+                    <CardTitle>Affinity Overlap</CardTitle>
+                    <CardDescription>{report.analysis.affinity_overlap_score.toFixed(1)}% taste overlap</CardDescription>
+                </CardHeader>
+                <CardContent className="h-[250px]">
+                    <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={chartData} layout="vertical" barCategoryGap="20%">
+                            <XAxis type="number" hide />
+                            <YAxis type="category" dataKey="name" hide />
+                            <Tooltip cursor={{ fill: 'transparent' }} />
+                            <Bar dataKey="value" radius={5}>
+                                {chartData.map((entry, index) => (
+                                    <text
+                                        key={`label-${index}`}
+                                        x={10}
+                                        y={index * (250 / chartData.length) + (250 / chartData.length) / 2}
+                                        dy={5}
+                                        fill="white"
+                                        className="text-sm font-medium"
+                                    >
+                                        {entry.name}
+                                    </text>
+                                ))}
+                            </Bar>
+                        </BarChart>
+                    </ResponsiveContainer>
+                </CardContent>
+            </Card>
+            <Card className="col-span-1">
+                <CardHeader>
+                    <CardTitle>Top Cultural Markers</CardTitle>
+                    <CardDescription>Key tastes defining each audience.</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-2 h-[250px] overflow-y-auto pr-2">
+                    {combinedData.map((item, index) => (
+                         <div key={index} className="flex items-center gap-2 text-sm">
+                            <span className={cn(
+                                "w-2 h-2 rounded-full flex-shrink-0",
+                                item.type === 'Shared' && 'bg-primary',
+                                item.type === 'Acquirer' && 'bg-blue-500',
+                                item.type === 'Target' && 'bg-purple-500',
+                            )}></span>
+                            <span className="font-medium truncate">{item.name}</span>
+                         </div>
+                    ))}
+                </CardContent>
+            </Card>
+        </div>
+    );
+};
+
+export const ReportView = ({ report, children }: ReportViewProps) => {
+    if (report.status === "FAILED") {
+        return <div className="flex h-full items-center justify-center p-8 text-center">
+            <div>
+                <AlertTriangle className="mx-auto h-12 w-12 text-destructive" />
+                <h2 className="mt-4 text-2xl font-bold">Report Generation Failed</h2>
+                <p className="mt-2 text-muted-foreground">We were unable to generate this report. This can happen due to issues with source data availability. Please try again or create a new report with different brands.</p>
+            </div>
+        </div>
+    }
+
+    return (
+        <ResizablePanelGroup direction="horizontal" className="h-full max-h-[calc(100vh-8rem)] w-full rounded-none border-0 sm:rounded-lg sm:border">
+            <ResizablePanel defaultSize={65} minSize={50}>
                 <ScrollArea className="h-full p-4 md:p-6">
-                <div className="space-y-6">
-                    <ReportHeader report={report} />
-                    
-                    <div className="grid md:grid-cols-3 gap-6">
-                        <div className="md:col-span-2 space-y-6">
-                            <Card>
-                                <CardHeader><CardTitle className="flex items-center gap-2"><Zap className="h-5 w-5 text-primary" />Strategic Summary</CardTitle></CardHeader>
-                                <CardContent><p className="text-muted-foreground whitespace-pre-wrap">{analysis?.strategic_summary}</p></CardContent>
-                            </Card>
-                            <Card>
-                                <CardHeader><CardTitle className="flex items-center gap-2"><TrendingUp className="h-5 w-5 text-green-500" />Untapped Growth Opportunities</CardTitle><CardDescription>Shared affinities that represent strategic pillars for post-acquisition integration.</CardDescription></CardHeader>
-                                <CardContent>
-                                    <Table><TableHeader><TableRow><TableHead>Opportunity</TableHead><TableHead className="text-right">Impact</TableHead></TableRow></TableHeader><TableBody>{report.untapped_growths.map((g) => (<TableRow key={g.id}><TableCell className="font-medium whitespace-normal">{g.description}</TableCell><TableCell className="text-right font-bold text-green-600 dark:text-green-400">{g.potential_impact_score}/10</TableCell></TableRow>))}</TableBody></Table>
-                                </CardContent>
-                            </Card>
-                            <Card>
-                                <CardHeader><CardTitle className="flex items-center gap-2"><AlertTriangle className="h-5 w-5 text-red-500" />Potential Culture Clashes</CardTitle><CardDescription>Divergent audience tastes that could pose integration risks.</CardDescription></CardHeader>
-                                <CardContent>
-                                    <Table><TableHeader><TableRow><TableHead>Clash Topic</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Severity</TableHead></TableRow></TableHeader><TableBody>{report.culture_clashes.map((c) => (<TableRow key={c.id}><TableCell className="font-semibold">{c.topic}</TableCell><TableCell className="text-muted-foreground whitespace-normal">{c.description}</TableCell><TableCell className="text-right"><SeverityBadge severity={c.severity} /></TableCell></TableRow>))}</TableBody></Table>
-                                </CardContent>
-                            </Card>
-                        </div>
-                        <div className="md:col-span-1 space-y-6">
-                            <Card>
-                                <CardHeader><CardTitle>Compatibility Score</CardTitle><CardDescription>Alignment based on audience taste data.</CardDescription></CardHeader>
-                                <CardContent className="flex flex-col items-center justify-center"><div className="text-7xl font-bold text-primary">{analysis?.cultural_compatibility_score}</div><p className="text-muted-foreground mt-1">out of 100</p></CardContent>
-                            </Card>
-                             {analysis?.search_sources && analysis.search_sources.length > 0 && (
+                    <div className="space-y-6">
+                        <ReportHeader report={report}>{children}</ReportHeader>
+                        <ScoreAndArchetypes report={report} />
+
+                        <Tabs defaultValue="affinity">
+                            <TabsList>
+                                <TabsTrigger value="affinity">Affinity Analysis</TabsTrigger>
+                                <TabsTrigger value="clashes">Culture Clashes</TabsTrigger>
+                                <TabsTrigger value="growth">Growth Opportunities</TabsTrigger>
+                                <TabsTrigger value="sources">Sources</TabsTrigger>
+                            </TabsList>
+                            <TabsContent value="affinity" className="mt-4">
+                                <AffinityAnalysis report={report} />
+                            </TabsContent>
+                            <TabsContent value="clashes" className="mt-4">
                                 <Card>
-                                    <CardHeader><CardTitle className="flex items-center gap-2"><Globe className="h-5 w-5 text-blue-500" />Grounding Sources</CardTitle><CardDescription>Web sources used for analysis.</CardDescription></CardHeader>
-                                    <CardContent className="flex flex-wrap gap-2">
-                                        {analysis.search_sources.map(source => <SourcePill key={source.url} url={source.url} />)}
+                                    <CardHeader><CardTitle className="flex items-center gap-2"><AlertTriangle className="h-5 w-5 text-red-500" />Potential Culture Clashes</CardTitle><CardDescription>Divergent audience tastes that could pose integration risks.</CardDescription></CardHeader>
+                                    <CardContent>
+                                        <Table><TableHeader><TableRow><TableHead>Clash Topic</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Severity</TableHead></TableRow></TableHeader><TableBody>{report.culture_clashes.map((c) => (<TableRow key={c.id}><TableCell className="font-semibold">{c.topic}</TableCell><TableCell className="text-muted-foreground whitespace-normal">{c.description}</TableCell><TableCell className="text-right"><SeverityBadge severity={c.severity} /></TableCell></TableRow>))}</TableBody></Table>
                                     </CardContent>
                                 </Card>
-                             )}
-                            <Card>
-                                <CardHeader><CardTitle>Brand Archetypes</CardTitle><CardDescription>AI-generated personalities based on affinities.</CardDescription></CardHeader>
-                                <CardContent className="space-y-4">
-                                    <div><h3 className="font-semibold text-foreground flex items-center gap-2"><Users className="h-4 w-4" />{report.acquirer_brand}</h3><p className="text-muted-foreground text-sm whitespace-pre-wrap">{archetypes.acquirer_archetype}</p></div>
-                                    <Separator />
-                                    <div><h3 className="font-semibold text-foreground flex items-center gap-2"><Target className="h-4 w-4" />{report.target_brand}</h3><p className="text-muted-foreground text-sm whitespace-pre-wrap">{archetypes.target_archetype}</p></div>
-                                </CardContent>
-                            </Card>
+                            </TabsContent>
+                            <TabsContent value="growth" className="mt-4">
+                                <Card>
+                                    <CardHeader><CardTitle className="flex items-center gap-2"><TrendingUp className="h-5 w-5 text-green-500" />Untapped Growth Opportunities</CardTitle><CardDescription>Shared affinities that represent strategic pillars for post-acquisition integration.</CardDescription></CardHeader>
+                                    <CardContent>
+                                        <Table>
+                                            <TableHeader><TableRow><TableHead>Opportunity</TableHead><TableHead className="text-right">Impact</TableHead></TableRow></TableHeader>
+                                            <TableBody>
+                                                {report.untapped_growths.length > 0 ? report.untapped_growths.map((g) => (
+                                                    <TableRow key={g.id}><TableCell className="font-medium whitespace-normal">{g.description}</TableCell><TableCell className="text-right font-bold text-green-600 dark:text-green-400">{g.potential_impact_score}/10</TableCell></TableRow>
+                                                )) : <TableRow><TableCell colSpan={2} className="text-center text-muted-foreground">No significant growth opportunities found.</TableCell></TableRow>}
+                                            </TableBody>
+                                        </Table>
+                                    </CardContent>
+                                </Card>
+                            </TabsContent>
+                             <TabsContent value="sources" className="mt-4">
+                                 {(report.analysis?.search_sources?.length || 0) > 0 || (report.analysis?.acquirer_sources?.length || 0) > 0 || (report.analysis?.target_sources?.length || 0) > 0 ? (
+                                     <Card>
+                                         <CardHeader><CardTitle className="flex items-center gap-2"><Globe className="h-5 w-5 text-blue-500" />Grounding Sources</CardTitle><CardDescription>Web sources used for analysis.</CardDescription></CardHeader>
+                                        {report.analysis?.acquirer_sources && report.analysis.acquirer_sources.length > 0 && <CardContent className="border-t pt-4"><h4 className="text-sm font-semibold mb-2">{report.acquirer_brand} Research</h4><div className="flex flex-wrap gap-2">{report.analysis.acquirer_sources.map(source => <SourcePill key={source.url} url={source.url} />)}</div></CardContent>}
+                                        {report.analysis?.target_sources && report.analysis.target_sources.length > 0 && <CardContent className="border-t pt-4"><h4 className="text-sm font-semibold mb-2">{report.target_brand} Research</h4><div className="flex flex-wrap gap-2">{report.analysis.target_sources.map(source => <SourcePill key={source.url} url={source.url} />)}</div></CardContent>}
+                                        {report.analysis?.search_sources && report.analysis.search_sources.length > 0 && <CardContent className="border-t pt-4"><h4 className="text-sm font-semibold mb-2">General Research</h4><div className="flex flex-wrap gap-2">{report.analysis.search_sources.map(source => <SourcePill key={source.url} url={source.url} />)}</div></CardContent>}
+                                     </Card>
+                                  ) : <p className="text-muted-foreground text-center py-8">No external sources were used for this analysis.</p>}
+                             </TabsContent>
+                        </Tabs>
+                        <div className="text-center text-xs text-muted-foreground pt-8">
+                            <p>Report ID: {report.id}</p>
+                            <p>Cultural taste data powered by <Link href="https://qloo.com" target="_blank" className="underline hover:text-foreground">Qloo, the AI for Culture and Taste</Link>.</p>
                         </div>
                     </div>
-                </div>
                 </ScrollArea>
             </ResizablePanel>
             <ResizableHandle withHandle />
@@ -8086,21 +8833,18 @@ export const ReportView = ({ report }: ReportViewProps) => {
     );
 };
 
+
 export const ReportViewSkeleton = () => {
   return (
-    <div className="container mx-auto py-6 space-y-6 animate-pulse">
+    <div className="h-full w-full animate-pulse p-6 space-y-6">
+      <div className="flex justify-between items-center"><Skeleton className="h-10 w-48" /><Skeleton className="h-10 w-48" /></div>
       <Skeleton className="h-24 w-full" />
-      <div className="grid md:grid-cols-3 gap-6">
-        <div className="md:col-span-2 space-y-6">
-          <Skeleton className="h-32 w-full" />
-          <Skeleton className="h-48 w-full" />
-          <Skeleton className="h-48 w-full" />
-        </div>
-        <div className="md:col-span-1 space-y-6">
-          <Skeleton className="h-32 w-full" />
-          <Skeleton className="h-48 w-full" />
-        </div>
+      <div className="grid md:grid-cols-2 gap-6">
+        <Skeleton className="h-64 w-full" />
+        <Skeleton className="h-64 w-full" />
       </div>
+      <Skeleton className="h-10 w-64" />
+      <Skeleton className="h-80 w-full" />
     </div>
   );
 };-e 
@@ -8726,6 +9470,7 @@ export const AlloyHeroSection: React.FC = () => {
             className="relative z-30 flex flex-col items-center max-w-4xl mx-auto"
           >
             <motion.div
+              //@ts-ignore
               variants={itemVariants}
               className="flex items-center space-x-2 px-4 py-2 bg-white/5 hover:bg-white/10 backdrop-blur-sm rounded-full text-sm mb-6 transition-all duration-300 group"
             >
@@ -8733,6 +9478,7 @@ export const AlloyHeroSection: React.FC = () => {
             </motion.div>
 
             <motion.h1
+              //@ts-ignore
               variants={itemVariants}
               className="text-5xl md:text-7xl font-light mb-2 tracking-tighter"
             >
@@ -8740,6 +9486,7 @@ export const AlloyHeroSection: React.FC = () => {
             </motion.h1>
 
             <motion.h2
+              //@ts-ignore
               variants={itemVariants}
               className="text-3xl md:text-5xl pb-3 font-light bg-gradient-to-r from-gray-200 via-gray-300 to-gray-400 bg-clip-text text-transparent"
             >
@@ -8747,6 +9494,7 @@ export const AlloyHeroSection: React.FC = () => {
             </motion.h2>
 
             <motion.p
+              //@ts-ignore
               variants={itemVariants}
               className="text-gray-400 mb-9 max-w-2xl mt-4"
             >
@@ -8755,7 +9503,8 @@ export const AlloyHeroSection: React.FC = () => {
 
             <Link href="/login">
               <motion.button
-                variants={itemVariants}
+                //@ts-ignore
+              variants={itemVariants}
                 whileHover={{ scale: 1.05 }}
                 whileTap={{ scale: 0.95 }}
                 className="px-8 py-3 bg-white text-black font-semibold rounded-full hover:bg-gray-200 transition-colors"
@@ -9027,7 +9776,7 @@ File: web/src/components/global/PromptInputBox.tsx
 
 import React, { useState, useRef, useEffect } from "react";
 import * as TooltipPrimitive from "@radix-ui/react-tooltip";
-import { ArrowUp, Paperclip, X, FileText, Search, Bot, ChevronsRight, Database, BrainCircuit, CheckCircle, AlertTriangle, Link as LinkIcon, Sparkles, Loader2 } from "lucide-react";
+import { ArrowUp, Paperclip, X, Search, Bot, Database, BrainCircuit, CheckCircle, AlertTriangle, Link as LinkIcon, Sparkles, Loader2, Microscope, MessageSquareQuote } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -9053,12 +9802,13 @@ const createDraftReport = async (url: string, { arg }: { arg: { token: string }}
 // TYPES
 interface Step {
   id: string;
-  status: 'info' | 'search' | 'source' | 'qloo' | 'synthesis' | 'saving' | 'complete' | 'error';
+  status: 'info' | 'search' | 'source' | 'analysis' | 'reasoning' | 'synthesis' | 'saving' | 'complete' | 'error';
   message?: string;
   payload?: any;
 }
 
 interface UploadedFileStatus {
+    id: string;
     name: string;
     status: 'uploading' | 'success' | 'error';
     message?: string;
@@ -9070,7 +9820,8 @@ interface PromptInputBoxProps {
   className?: string;
 }
 
-// TOOLTIP
+// --- CHILD COMPONENTS ---
+
 const TooltipProvider = TooltipPrimitive.Provider;
 const Tooltip = TooltipPrimitive.Root;
 const TooltipTrigger = TooltipPrimitive.Trigger;
@@ -9079,30 +9830,23 @@ const TooltipContent = React.forwardRef<React.ElementRef<typeof TooltipPrimitive
 ));
 TooltipContent.displayName = TooltipPrimitive.Content.displayName;
 
-// FAVICON
-const Favicon = ({ url, ...props }: { url: string } & Partial<React.ComponentProps<typeof Image>>) => {
-    const API_URL = process.env.NEXT_PUBLIC_API_URL;
-    const faviconUrl = `${API_URL}/utils/favicon?url=${encodeURIComponent(url)}`;
+const SourceItem = ({ source }: { source: { url: string, title?: string }}) => {
+    const faviconUrl = `https://satori-rho.vercel.app/api/image?url=${source.url}`;
     return (
-        <Image 
-            src={faviconUrl} 
-            alt="favicon" 
-            width={16} 
-            height={16} 
-            className="rounded-full"
-            unoptimized 
-            {...props}
-        />
+        <Link href={source.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 group">
+            <Image src={faviconUrl} alt="source favicon" width={16} height={16} className="rounded-full" unoptimized/>
+            <span className="truncate group-hover:underline text-blue-600 dark:text-blue-400">{source.title || source.url}</span>
+        </Link>
     );
 };
 
-// STEP ITEM COMPONENT
 const StepItem = ({ step }: { step: Step }) => {
     const ICONS = {
         info: <Bot className="h-4 w-4 text-primary" />,
         search: <Search className="h-4 w-4 text-blue-500" />,
         source: <LinkIcon className="h-4 w-4 text-muted-foreground" />,
-        qloo: <ChevronsRight className="h-4 w-4 text-purple-500" />,
+        analysis: <Microscope className="h-4 w-4 text-purple-500" />,
+        reasoning: <MessageSquareQuote className="h-4 w-4 text-gray-500" />,
         synthesis: <BrainCircuit className="h-4 w-4 text-amber-500" />,
         saving: <Database className="h-4 w-4 text-green-500" />,
         complete: <CheckCircle className="h-4 w-4 text-green-500" />,
@@ -9110,13 +9854,9 @@ const StepItem = ({ step }: { step: Step }) => {
     };
 
     const renderContent = () => {
+        // CORE FIX: When the step is a source, render the SourceItem component
         if (step.status === 'source' && step.payload) {
-            return (
-                <Link href={step.payload.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 group">
-                    <Favicon url={step.payload.url} />
-                    <span className="truncate group-hover:underline">{step.payload.title || step.payload.url}</span>
-                </Link>
-            );
+            return <SourceItem source={step.payload} />;
         }
         return step.message;
     };
@@ -9124,18 +9864,20 @@ const StepItem = ({ step }: { step: Step }) => {
     return (
         <motion.div layout initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.3 }} className="flex items-start gap-3 text-sm">
             <div className="flex-shrink-0 mt-0.5">{ICONS[step.status] || <Sparkles className="h-4 w-4" />}</div>
-            <div className={cn("flex-grow", step.status === 'error' && "text-destructive font-medium")}>{renderContent()}</div>
+            <div className={cn("flex-grow", 
+                step.status === 'error' && "text-destructive font-medium",
+                step.status === 'reasoning' && "text-muted-foreground italic"
+            )}>{renderContent()}</div>
         </motion.div>
     );
 };
 
-// MAIN COMPONENT
+// --- MAIN COMPONENT ---
 export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxProps>(
   ({ onReportCreated, onPristineChange, className }, ref) => {
     const { accessToken } = useAuth();
     const API_URL = process.env.NEXT_PUBLIC_API_URL;
 
-    // Input state
     const [draftReportId, setDraftReportId] = useState<number | null>(null);
     const [acquirer, setAcquirer] = useState("");
     const [target, setTarget] = useState("");
@@ -9143,10 +9885,8 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
     const [uploadedFile, setUploadedFile] = useState<UploadedFileStatus | null>(null);
     const [useGrounding, setUseGrounding] = useState(false);
     
-    // Generation state
     const [logSteps, setLogSteps] = useState<Step[]>([]);
     const [sources, setSources] = useState<Step[]>([]);
-    const [allSourcesStreamed, setAllSourcesStreamed] = useState(false);
     const [isGenerating, setIsGenerating] = useState(false);
     const [isCollapsibleOpen, setIsCollapsibleOpen] = useState(true);
 
@@ -9170,27 +9910,17 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
     const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file || !draftReportId) return;
-
-        setUploadedFile({ name: file.name, status: 'uploading' });
-
+        const fileId = `${file.name}-${Date.now()}`;
+        setUploadedFile({ id: fileId, name: file.name, status: 'uploading' });
         const formData = new FormData();
         formData.append('file', file);
-
         try {
-            const response = await fetch(`${API_URL}/reports/${draftReportId}/upload_context_file`, {
-                method: 'POST',
-                headers: { 'Authorization': `Bearer ${accessToken!}` },
-                body: formData,
-            });
-
-            const result = await response.json();
-            if (!response.ok) { throw new Error(result.detail || 'File upload failed'); }
-
-            setUploadedFile({ name: file.name, status: 'success', message: 'Context uploaded' });
+            const res = await fetch(`${API_URL}/reports/${draftReportId}/upload_context_file`, { method: 'POST', headers: { 'Authorization': `Bearer ${accessToken!}` }, body: formData });
+            if (!res.ok) { const errorData = await res.json(); throw new Error(errorData.detail || 'File upload failed'); }
+            setUploadedFile({ id: fileId, name: file.name, status: 'success', message: 'Context uploaded' });
             toast.success("Context file uploaded successfully.");
-
         } catch (error: any) {
-            setUploadedFile({ name: file.name, status: 'error', message: error.message });
+            setUploadedFile({ id: fileId, name: file.name, status: 'error', message: error.message });
             toast.error("File Upload Failed", { description: error.message });
         }
     };
@@ -9200,19 +9930,13 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
              toast.error("Invalid Input", { description: "Please provide full, official brand names."});
             return;
         }
-        setIsGenerating(true);
-        setLogSteps([]);
-        setSources([]);
-        setAllSourcesStreamed(false);
-        setIsCollapsibleOpen(true);
+        setIsGenerating(true); setLogSteps([]); setSources([]); setIsCollapsibleOpen(true);
         
         try {
             const response = await fetch(`${API_URL}/reports/${draftReportId}/generate`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken!}` },
+                method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken!}` },
                 body: JSON.stringify({ acquirer_brand: acquirer, target_brand: target, title: `${acquirer} vs. ${target}`, context: notes, use_grounding: useGrounding })
             });
-
             if (!response.ok || !response.body) { throw new Error(response.statusText || "Server response was invalid."); }
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
@@ -9229,20 +9953,19 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
                     if (line.startsWith('data: ')) {
                         const jsonData = JSON.parse(line.substring(6));
                         const newStep: Step = { id: `step-${Date.now()}-${Math.random()}`, ...jsonData };
-                        if (newStep.status === 'source') setSources(prev => [...prev, newStep]);
-                        else {
-                            setLogSteps(prev => [...prev, newStep]);
-                            if (newStep.status !== 'search' && !allSourcesStreamed) { setAllSourcesStreamed(true); setIsCollapsibleOpen(false); }
-                        }
+                        if (newStep.status === 'source') { setSources(prev => [...prev, newStep]); } 
+                        else { setLogSteps(prev => [...prev, newStep]); }
+                        
                         if (newStep.status === 'complete') {
                             toast.success("Report generated successfully!");
                             onReportCreated();
-                            setTimeout(() => setIsGenerating(false), 1000);
+                            setTimeout(() => handleReset(false), 1000);
                             return;
                         }
                         if (newStep.status === 'error') {
                             toast.error("Generation Failed", { description: newStep.message });
-                            setIsGenerating(false); return;
+                            handleReset();
+                            return;
                         }
                     }
                 }
@@ -9250,16 +9973,10 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
         } catch (err: any) { toast.error("An error occurred", { description: err.message }); setIsGenerating(false); }
     };
     
-    const handleReset = () => {
-        setIsGenerating(false);
-        setLogSteps([]);
-        setSources([]);
-        setAllSourcesStreamed(false);
-        setAcquirer("");
-        setTarget("");
-        setNotes("");
-        setUploadedFile(null);
-        setDraftReportId(null);
+    const handleReset = (resetId = true) => {
+        setIsGenerating(false); setLogSteps([]); setSources([]);
+        setAcquirer(""); setTarget(""); setNotes(""); setUploadedFile(null);
+        if (resetId) setDraftReportId(null);
     }
 
     const canSubmit = acquirer.trim().length > 1 && target.trim().length > 1 && uploadedFile?.status !== 'uploading';
@@ -9268,18 +9985,18 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
         return <div ref={ref} className={cn("w-full max-w-3xl mx-auto", className)}>
             <motion.div layout className="relative w-full rounded-2xl border border-border bg-card shadow-xl transition-all">
                 <div className="p-4"><h3 className="font-semibold text-center text-foreground">Generating Report...</h3><p className="text-center text-sm text-muted-foreground">{acquirer} vs. {target}</p></div>
-                <ScrollArea className="h-64 px-4" ref={scrollAreaRef}>
+                <ScrollArea className="h-[30rem] max-h-[60vh] px-4" ref={scrollAreaRef}>
                     <div className="space-y-3 py-4">
                         <AnimatePresence>{logSteps.map((step) => <StepItem key={step.id} step={step} />)}</AnimatePresence>
                         {sources.length > 0 && <Collapsible open={isCollapsibleOpen} onOpenChange={setIsCollapsibleOpen}>
                             <CollapsibleTrigger className="w-full p-2 rounded-md hover:bg-muted/50 text-left">
-                                <div className="flex items-center justify-between"><div className="flex items-center gap-2 overflow-hidden"><span className="text-sm font-medium">Found {sources.length} sources</span><div className="flex items-center gap-1.5 flex-shrink min-w-0">{sources.map(source => <motion.div key={source.id} layout><Favicon url={source.payload.url}/></motion.div>)}</div></div><span className="text-xs text-muted-foreground">{isCollapsibleOpen ? 'Collapse' : 'Expand'}</span></div>
+                                <div className="flex items-center justify-between"><div className="flex items-center gap-2 overflow-hidden"><Search className="h-4 w-4 text-blue-500 flex-shrink-0"/><span className="text-sm font-medium">Found {sources.length} sources</span><div className="flex items-center gap-1.5 flex-shrink min-w-0">{sources.map(source => <motion.div key={source.id} layout><Image src={`https://satori-rho.vercel.app/api/image?url=${source.payload.url}`} alt="favicon" width={16} height={16} className="rounded-full" unoptimized/></motion.div>)}</div></div><span className="text-xs text-muted-foreground">{isCollapsibleOpen ? 'Collapse' : 'Expand'}</span></div>
                             </CollapsibleTrigger>
                             <CollapsibleContent className="space-y-3 pt-2">{sources.map(source => <StepItem key={source.id} step={source} />)}</CollapsibleContent>
                         </Collapsible>}
                     </div>
                 </ScrollArea>
-                <div className="flex items-center justify-end p-2 border-t border-border"><Button onClick={handleReset} disabled={isGenerating}>Create New Report</Button></div>
+                <div className="flex items-center justify-end p-2 border-t border-border"><Button onClick={() => handleReset(true)}>Create New Report</Button></div>
             </motion.div>
         </div>
     }
@@ -9324,7 +10041,7 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
               </div>
             </motion.div>
             <p className="text-center text-xs text-muted-foreground mt-3 px-4">
-                Please use full, official brand names for best results. Data provided by Tavily and Qloo, the AI for culture and taste.
+                Please use full, official brand names for best results. Data provided by Qloo, the AI for culture and taste.
             </p>
         </div>
     );
@@ -9566,8 +10283,7 @@ File: web/src/components/global/Header.tsx
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import React, { useState, useEffect } from "react";
-import { useTheme } from "next-themes";
+import React, { useState, useEffect, useMemo } from "react";
 import {
   Home,
   Users,
@@ -9577,9 +10293,6 @@ import {
   PanelLeft,
   PlusCircle,
   LogOut,
-  Moon,
-  Sun,
-  Laptop,
   CreditCard,
   LifeBuoy
 } from "lucide-react";
@@ -9600,10 +10313,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Logo } from "@/components/global/Logo";
 import { useAuth } from "./providers";
 import { CommandPalette } from "./CommandPalette";
+import { UserAvatar } from "./UserAvatar";
 
 const mobileNavItems = [
   { href: "/dashboard", icon: Home, label: "Dashboard" },
@@ -9616,7 +10329,6 @@ const mobileNavItems = [
 
 export function Header() {
   const { logout, user } = useAuth();
-  const { setTheme } = useTheme();
   const [isCommandOpen, setCommandOpen] = useState(false);
   const pathname = usePathname();
 
@@ -9631,12 +10343,10 @@ export function Header() {
     return () => document.removeEventListener("keydown", down);
   }, []);
   
-  const getInitials = (email?: string) => {
-    return email ? email.charAt(0).toUpperCase() : "A";
-  };
-
-  const displayName = user?.email.split('@')[0] || "User";
-
+  const displayName = useMemo(
+    () => user?.full_name || user?.email?.split('@')[0] || "User",
+    [user]
+  );
   return (
     <>
       <header className="sticky top-0 z-30 flex h-16 items-center justify-between gap-4 border-b bg-background px-4 sm:px-6">
@@ -9650,7 +10360,7 @@ export function Header() {
                 </Button>
             </SheetTrigger>
             <SheetContent side="left" className="sm:max-w-xs">
-                <nav className="grid gap-6 text-lg font-medium">
+                <nav className="grid gap-6 text-lg font-medium mt-6">
                 <Logo />
                 {mobileNavItems.map((item) => {
                     const isActive = pathname.startsWith(item.href) && (item.href !== "/dashboard" || pathname === "/dashboard");
@@ -9696,12 +10406,7 @@ export function Header() {
 
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" className="relative h-9 w-9 rounded-full">
-                <Avatar className="h-9 w-9">
-                  <AvatarImage src="" alt={displayName} />
-                  <AvatarFallback>{getInitials(user?.email)}</AvatarFallback>
-                </Avatar>
-              </Button>
+               <Button variant="ghost" className="relative h-9 w-9 rounded-full"><UserAvatar user={user} /></Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent className="w-64" align="end" forceMount>
                 <DropdownMenuLabel className="font-normal">
@@ -9726,18 +10431,6 @@ export function Header() {
                                 <DropdownMenuItem>Wayne Enterprises</DropdownMenuItem>
                                 <DropdownMenuSeparator />
                                 <DropdownMenuItem><PlusCircle className="mr-2 h-4 w-4" /> Create New</DropdownMenuItem>
-                        </DropdownMenuSubContent></DropdownMenuPortal>
-                    </DropdownMenuSub>
-                    <DropdownMenuSub>
-                        <DropdownMenuSubTrigger>
-                            <Sun className="mr-2 h-4 w-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
-                            <Moon className="absolute mr-2 h-4 w-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
-                            <span>Toggle Theme</span>
-                        </DropdownMenuSubTrigger>
-                        <DropdownMenuPortal><DropdownMenuSubContent>
-                                <DropdownMenuItem onClick={() => setTheme("light")}>Light</DropdownMenuItem>
-                                <DropdownMenuItem onClick={() => setTheme("dark")}>Dark</DropdownMenuItem>
-                                <DropdownMenuItem onClick={() => setTheme("system")}>System</DropdownMenuItem>
                         </DropdownMenuSubContent></DropdownMenuPortal>
                     </DropdownMenuSub>
                 </DropdownMenuGroup>
@@ -9893,6 +10586,45 @@ export function Sidebar() {
 }-e 
 -e
 
+File: web/src/components/global/UserAvatar.tsx
+"use client";
+
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+
+interface User {
+    email: string;
+    full_name?: string;
+}
+
+interface UserAvatarProps {
+  user?: User | null;
+}
+
+const getInitials = (name?: string, email?: string): string => {
+  if (name) {
+    const parts = name.split(" ");
+    if (parts.length > 1 && parts[0] && parts[parts.length - 1]) {
+      return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
+    }
+    return name.substring(0, 2).toUpperCase();
+  }
+  if (email) {
+    return email.charAt(0).toUpperCase();
+  }
+  return "A";
+};
+
+export const UserAvatar = ({ user }: UserAvatarProps) => {
+  return (
+    <Avatar className="h-9 w-9">
+      {/* The backend doesn't provide image URLs yet, so this will always use the fallback */}
+      <AvatarImage src="" alt={user?.full_name || user?.email} />
+      <AvatarFallback>{getInitials(user?.full_name, user?.email)}</AvatarFallback>
+    </Avatar>
+  );
+};-e 
+-e
+
 File: web/src/components/global/providers.tsx
 "use client";
 
@@ -9916,6 +10648,7 @@ const parseJwt = (token: string) => {
 
 interface User {
     email: string;
+    full_name?: string;
 }
 
 interface AuthContextType {
@@ -9938,8 +10671,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     const token = Cookies.get('alloy_access_token');
     if (token) {
       const decodedToken = parseJwt(token);
-      if (decodedToken?.sub) {
-        setUser({ email: decodedToken.sub });
+      if (decodedToken && decodedToken.sub) {
+        setUser({ email: decodedToken.sub, full_name: decodedToken.full_name });
         setAccessToken(token);
       }
     }
@@ -9948,10 +10681,10 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   const login = useCallback((token: string, refreshToken: string) => {
     const decodedToken = parseJwt(token);
-    if (decodedToken?.sub) {
-      setUser({ email: decodedToken.sub });
+    if (decodedToken && decodedToken.sub) {
+      setUser({ email: decodedToken.sub, full_name: decodedToken.full_name });
       setAccessToken(token);
-      Cookies.set('alloy_access_token', token, { expires: 1/48, secure: process.env.NODE_ENV === 'production' });
+      Cookies.set('alloy_access_token', token, { expires: 1/24, secure: process.env.NODE_ENV === 'production' }); // 1 hour
       Cookies.set('alloy_refresh_token', refreshToken, { expires: 7, secure: process.env.NODE_ENV === 'production' });
     }
   }, []);
@@ -10067,9 +10800,15 @@ backend/src
 ├── services
 │   ├── __pycache__
 │   │   ├── docling.cpython-313.pyc
+│   │   ├── pdf_generator.cpython-313.pyc
+│   │   ├── pdf_template.cpython-313.pyc
+│   │   ├── react_agent.cpython-313.pyc
 │   │   ├── report_generator.cpython-313.pyc
 │   │   └── search.cpython-313.pyc
 │   ├── docling.py
+│   ├── pdf_generator.py
+│   ├── pdf_template.py
+│   ├── react_agent.py
 │   ├── report_generator.py
 │   └── search.py
 └── utils
@@ -10077,7 +10816,7 @@ backend/src
     └── __pycache__
         └── __init__.cpython-313.pyc
 
-16 directories, 35 files
+16 directories, 41 files
 
 Web App Tree:
 web/src
@@ -10119,7 +10858,8 @@ web/src
 │   │   ├── Logo.tsx
 │   │   ├── PromptInputBox.tsx
 │   │   ├── providers.tsx
-│   │   └── Sidebar.tsx
+│   │   ├── Sidebar.tsx
+│   │   └── UserAvatar.tsx
 │   ├── report
 │   │   ├── AIAnalystChat.tsx
 │   │   ├── ChatCreator.tsx
@@ -10178,7 +10918,7 @@ web/src
 └── types
     └── report.ts
 
-20 directories, 77 files
+20 directories, 78 files
 
 -----------------------
 

@@ -3,7 +3,7 @@ from passlib.context import CryptContext
 from jose import JWTError, jwt
 from typing import Dict, Any, Optional
 from sqlmodel import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio.session import AsyncSession
 
 from src.core.settings import get_settings
 from src.db import models
@@ -38,6 +38,6 @@ def decode_token(token: str) -> Optional[Dict[str, Any]]:
 async def get_user_by_email(session: AsyncSession, email: str) -> Optional[models.User]:
     """Fetches a user by their email address."""
     statement = select(models.User).where(models.User.email == email)
-    
+
     result = await session.execute(statement)
     return result.scalar_one_or_none()

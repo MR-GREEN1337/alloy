@@ -10,16 +10,20 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { signIn } from "next-auth/react";
 import Link from "next/link";
 import { useState, FormEvent } from "react";
-import { FaGoogle as GoogleIcon} from "react-icons/fa";
+import { FaGoogle } from "react-icons/fa";
+import Logo from "@/components/global/Logo";
+import { useAuth } from "@/components/global/providers";
+import { useRouter } from 'next/navigation';
 
 export default function RegisterPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const { login } = useAuth();
+  const router = useRouter();
 
   const handleRegister = async (e: FormEvent) => {
     e.preventDefault();
@@ -30,40 +34,49 @@ export default function RegisterPage() {
       return;
     }
 
+    const formData = new URLSearchParams();
+    formData.append('username', email);
+    formData.append('password', password);
+
     try {
+      // 1. Register the user
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/register`, {
         method: 'POST',
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, password, full_name: "" }),
         headers: { 'Content-Type': 'application/json' }
       });
 
       if (!res.ok) {
         const errorData = await res.json();
-        setError(errorData.detail || "Failed to register.");
+        setError(errorData.detail || "Registration failed.");
         return;
       }
       
-      // Automatically sign in the user after successful registration
-      const signInResponse = await signIn("credentials", {
-        email,
-        password,
-        redirect: true,
-        callbackUrl: "/dashboard",
-      });
+      // 2. Log the user in to get tokens
+      const loginRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: formData.toString(),
+      })
 
-      if(signInResponse?.error) {
-        setError("Registration successful, but login failed. Please try logging in manually.");
+      if (!loginRes.ok) {
+        throw new Error("Registration successful, but login failed. Please log in manually.");
       }
 
+      const tokens = await loginRes.json();
+      login(tokens.access_token, tokens.refresh_token);
+      router.push("/dashboard");
+
     } catch (err) {
-      setError("An unexpected error occurred. Please try again.");
-      console.error(err);
+      setError(err instanceof Error ? err.message : "An unexpected error occurred. Please try again.");
     }
   };
+  const googleAuthUrl = `${process.env.NEXT_PUBLIC_API_URL}/auth/google/authorize`;
 
   return (
     <Card className="w-full max-w-sm">
       <CardHeader className="text-center">
+        <Logo className="mx-auto" />
         <CardTitle className="text-2xl">Create an Account</CardTitle>
         <CardDescription>
           Get started with your data-driven Cultural Compatibility Score.
@@ -113,8 +126,10 @@ export default function RegisterPage() {
           <div className="flex-grow border-t border-muted" />
         </div>
         <div className="space-y-2">
-          <Button variant="outline" className="w-full" onClick={() => signIn('google')}>
-            <GoogleIcon /> Sign up with Google
+          <Button variant="outline" className="w-full" asChild>
+            <a href={googleAuthUrl}>
+              <FaGoogle className="mr-2" /> Sign up with Google
+            </a>
           </Button>
         </div>
       </CardContent>

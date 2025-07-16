@@ -4,12 +4,10 @@ from sqlalchemy.sql import text
 from typing import AsyncGenerator, Dict, Any
 from contextlib import asynccontextmanager
 import asyncio
-from datetime import datetime
 from sqlmodel import SQLModel
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 from loguru import logger
 import ssl
-import os
 from src.core.settings import get_settings
 
 settings = get_settings()
@@ -19,50 +17,67 @@ class PostgresDatabase:
     def __init__(self):
         self.DATABASE_URL = settings.POSTGRES_DATABASE_URL
         if not self.DATABASE_URL:
-            logger.warning("DATABASE_URL not set, using development defaults")
-            self.DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:5432/ustadh"
+            raise ValueError("POSTGRES_DATABASE_URL environment variable is not set.")
         
+        # Parse the URL and extract SSL mode if present
         url = urlparse(self.DATABASE_URL)
-        base_url = f"postgresql+asyncpg://{url.netloc}{url.path}"
         self.db_host, self.db_port, self.db_user = url.hostname, url.port or 5432, url.username
-        self.db_name = url.path.lstrip("/") if url.path else None
         self.schema = getattr(settings, "POSTGRES_SCHEMA", "public")
 
-        ssl_context = None
-        if settings.POSTGRES_USE_SSL:
+        # Extract sslmode from query parameters
+        query_params = parse_qs(url.query)
+        sslmode = query_params.get('sslmode', [None])[0]
+        
+        # Remove query parameters from the URL to create a clean database URL
+        clean_url = self.DATABASE_URL.split('?')[0]
+        self.DATABASE_URL = clean_url
+
+        # --- CORRECTED SSL and connect_args LOGIC ---
+        connect_args: Dict[str, Any] = {}
+        
+        # Handle SSL configuration
+        if settings.POSTGRES_USE_SSL or sslmode in ['require', 'prefer']:
             ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+            # The following lines are often needed for cloud providers that don't
+            # have their CA in the default trust store. Adjust as needed.
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
-
-        connect_args: Dict[str, Any] = {}
-        if ssl_context:
             connect_args["ssl"] = ssl_context
-
-        # THE FIX: In a development environment, prepared statement caching can cause
-        # errors when the schema changes during hot-reloading (e.g., dropping/creating
-        # tables on startup). Disabling the cache for asyncpg resolves this.
+        elif sslmode == 'disable':
+            # Explicitly disable SSL
+            connect_args["ssl"] = False
+        
+        # CORE FIX: In a development environment, prepared statement caching can cause
+        # errors when the schema changes during hot-reloading (e.g., dropping and
+        # recreating tables on startup). Disabling the cache for asyncpg resolves this.
         if settings.ENVIRONMENT == "development":
             # The value 0 disables the cache.
             connect_args["statement_cache_size"] = 0
             logger.warning(
-                "DEV MODE: Disabling statement cache to prevent schema change errors."
+                "DEV MODE: Disabling prepared statement cache to prevent schema change errors."
             )
 
         self.pool_size = settings.POSTGRES_POOL_SIZE
         self.max_overflow = settings.POSTGRES_MAX_OVERFLOW
         self.pool_timeout = settings.POSTGRES_POOL_TIMEOUT
-        self.pool_recycle = int(os.getenv("POSTGRES_POOL_RECYCLE", "1800"))
-        self.max_retries = int(os.getenv("POSTGRES_MAX_RETRIES", "5"))
-        self.retry_delay = int(os.getenv("POSTGRES_RETRY_DELAY", "2"))
+        self.pool_recycle = settings.POSTGRES_POOL_RECYCLE
+        self.max_retries = 5
+        self.retry_delay = 2
         self.debug_mode = settings.DEBUG
 
         try:
             self.engine = create_async_engine(
-                base_url, echo=self.debug_mode, pool_size=self.pool_size, max_overflow=self.max_overflow,
-                pool_timeout=self.pool_timeout, pool_recycle=self.pool_recycle, pool_pre_ping=True, connect_args=connect_args
+                self.DATABASE_URL, 
+                echo=self.debug_mode, 
+                pool_size=self.pool_size, 
+                max_overflow=self.max_overflow,
+                pool_timeout=self.pool_timeout, 
+                pool_recycle=self.pool_recycle, 
+                pool_pre_ping=True, 
+                connect_args=connect_args
             )
             self.async_session_maker = sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
-            logger.info(f"PostgreSQL connection initialized: host={self.db_host}, user={self.db_user}, db={self.db_name}, schema={self.schema}")
+            logger.info(f"PostgreSQL connection initialized: host={self.db_host}, user={self.db_user}, schema={self.schema}")
         except Exception as e:
             logger.error(f"Failed to initialize PostgreSQL connection: {str(e)}")
             raise
@@ -82,7 +97,7 @@ class PostgresDatabase:
                     # Ensure the schema exists
                     await conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {self.schema}"))
                     
-                    # THE FIX: In a dev environment, ensure schema is always up-to-date.
+                    # CORE FIX: In a dev environment, ensure schema is always up-to-date.
                     if settings.ENVIRONMENT == "development":
                         logger.warning("DEV MODE: Dropping and recreating tables for schema sync.")
                         await conn.run_sync(SQLModel.metadata.drop_all)
@@ -122,19 +137,6 @@ class PostgresDatabase:
     async def get_db_session(self) -> AsyncGenerator[AsyncSession, None]:
         async with self.get_session() as session:
             yield session
-
-    async def health_check(self) -> Dict[str, Any]:
-        start_time = datetime.utcnow()
-        status = {"status": "error", "message": "", "details": {}}
-        try:
-            async with self.async_session_maker() as session:
-                await session.execute(text("SELECT 1"))
-            end_time = datetime.utcnow()
-            response_time = (end_time - start_time).total_seconds() * 1000
-            status.update({"status": "ok", "message": "Database connection successful", "details": {"response_time_ms": round(response_time, 2)}})
-        except Exception as e:
-            status.update({"message": str(e)})
-        return status
 
 postgres_db = PostgresDatabase()
 

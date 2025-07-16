@@ -4,8 +4,9 @@ import useSWR from 'swr';
 import { useAuth } from '@/components/global/providers';
 import { ReportView, ReportViewSkeleton } from '@/components/report/ReportView';
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
-import { AlertCircle } from 'lucide-react';
+import { AlertCircle, Download } from 'lucide-react';
 import { useParams } from 'next/navigation';
+import { Button } from '@/components/ui/button';
 
 const fetcher = (url: string, token: string) => 
   fetch(url, { headers: { 'Authorization': `Bearer ${token}` } }).then(res => {
@@ -21,10 +22,13 @@ const fetcher = (url: string, token: string) =>
 export default function ReportPage() {
     const { id } = useParams<{ id: string }>();
     const { accessToken } = useAuth();
+    const API_URL = process.env.NEXT_PUBLIC_API_URL;
     const { data: report, error, isLoading } = useSWR(
-        accessToken ? [`${process.env.NEXT_PUBLIC_API_URL}/reports/${id}`, accessToken] : null,
+        accessToken ? [`${API_URL}/reports/${id}`, accessToken] : null,
         ([url, token]) => fetcher(url, token)
     );
+
+    const downloadUrl = report && accessToken ? `${API_URL}/reports/${report.id}/download-pdf?token=${accessToken}` : '';
 
     if (isLoading) {
         return <ReportViewSkeleton />;
@@ -46,6 +50,14 @@ export default function ReportPage() {
         return null;
     }
 
-    // The main view is now full-height, no container needed here.
-    return <ReportView report={report} />;
+    return (
+        <ReportView report={report}>
+            <Button asChild>
+                <a href={downloadUrl} download>
+                    <Download className="mr-2 h-4 w-4" />
+                    Download PDF
+                </a>
+            </Button>
+        </ReportView>
+    );
 }
