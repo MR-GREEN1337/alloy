@@ -6,8 +6,6 @@ from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
 
 def get_pdf_styles():
     """Returns a dictionary of styled reportlab ParagraphStyle objects."""
-    # This is a temporary fix, styles should be defined once and passed around.
-    # But for a quick fix, let's redefine it where needed.
     base_styles = getSampleStyleSheet()
     styles = {
         'default': ParagraphStyle(name='default', fontName='Helvetica', fontSize=10, leading=14),
@@ -18,9 +16,7 @@ def get_pdf_styles():
         'right': ParagraphStyle(name='right', parent=base_styles['Normal'], alignment=TA_RIGHT),
         'small_grey': ParagraphStyle(name='small_grey', fontSize=8, fontName='Helvetica', textColor=colors.grey),
     }
-    # Add center style specifically for key metrics if it's not inheriting correctly
     styles['center_bold'] = ParagraphStyle(name='center_bold', parent=styles['center'], fontName='Helvetica-Bold')
-
     return styles
 
 def create_header(styles):
@@ -40,7 +36,6 @@ def create_title_section(report, styles):
 
 def create_key_metrics_table(report, doc_width, styles):
     """Creates the top-line metrics table."""
-    # CORE FIX: Use the passed-in styles dictionary correctly.
     score_data = [
         [
             Paragraph(f"<font size=24>{report.analysis.cultural_compatibility_score:.0f}</font>/100", styles['center']),
@@ -58,6 +53,47 @@ def create_key_metrics_table(report, doc_width, styles):
         ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.lightgrey),
     ]))
     return [table, Spacer(1, 0.3 * inch)]
+
+def create_corporate_culture_section(report, llm_summary, doc_width, styles):
+    """Creates the corporate culture analysis section."""
+    corporate_ethos = llm_summary.get("corporate_ethos", {})
+    acquirer_ethos_text = corporate_ethos.get('acquirer_ethos', '')
+    target_ethos_text = corporate_ethos.get('target_ethos', '')
+
+    if not acquirer_ethos_text and not target_ethos_text:
+        return []
+
+    acquirer_ethos = acquirer_ethos_text.replace('\n', '<br/>')
+    target_ethos = target_ethos_text.replace('\n', '<br/>')
+
+    story = []
+    story.append(Paragraph("Corporate Culture & Ethos", styles['h2']))
+    
+    ethos_data = [
+        [Paragraph(f"<b>{report.acquirer_brand}</b>", styles['h3']), Paragraph(f"<b>{report.target_brand}</b>", styles['h3'])],
+        [Paragraph(acquirer_ethos, styles['default']), Paragraph(target_ethos, styles['default'])]
+    ]
+    ethos_table = Table(ethos_data, colWidths=[doc_width / 2.0 - 5, doc_width / 2.0 - 5])
+    ethos_table.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('BOX', (0, 0), (-1, -1), 1, colors.lightgrey),
+        ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.lightgrey),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+    ]))
+    return [ethos_table, Spacer(1, 0.3*inch)]
+
+def create_financial_analysis_section(llm_summary, styles):
+    """Creates the financial and market analysis summary section."""
+    financial_synthesis = llm_summary.get("financial_synthesis", "")
+    if not financial_synthesis:
+        return []
+    
+    story = []
+    story.append(Paragraph("Financial & Market Analysis", styles['h2']))
+    story.append(Paragraph(financial_synthesis.replace('\n', '<br/>'), styles['default']))
+    story.append(Spacer(1, 0.3 * inch))
+    return story
 
 def create_clashes_table(report, doc_width, styles):
     """Creates the culture clashes table."""

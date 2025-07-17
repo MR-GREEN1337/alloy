@@ -20,13 +20,17 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [isGuestLoading, setIsGuestLoading] = useState(false);
   const { login } = useAuth();
   const router = useRouter();
   const searchParams = useSearchParams();
+  const isLoading = isLoggingIn || isGuestLoading;
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setIsLoggingIn(true);
 
     const formData = new URLSearchParams();
     formData.append('username', email);
@@ -53,6 +57,32 @@ export default function LoginPage() {
 
     } catch (err) {
       setError(err instanceof Error ? err.message : "An unexpected error occurred. Please try again.");
+    } finally {
+        setIsLoggingIn(false);
+    }
+  };
+
+  const handleGuestLogin = async () => {
+    setError(null);
+    setIsGuestLoading(true);
+    try {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/guest`, {
+        method: 'POST',
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json();
+        setError(errorData.detail || "Guest login failed. Please try again.");
+        return;
+      }
+
+      const tokens = await res.json();
+      login(tokens.access_token, tokens.refresh_token);
+      router.push("/dashboard");
+    } catch (err) {
+        setError(err instanceof Error ? err.message : "An unexpected error occurred. Please try again.");
+    } finally {
+        setIsGuestLoading(false);
     }
   };
 
@@ -92,8 +122,8 @@ export default function LoginPage() {
               onChange={(e) => setPassword(e.target.value)}
             />
           </div>
-          <Button type="submit" className="w-full">
-            Log In
+          <Button type="submit" className="w-full" disabled={isLoading}>
+            {isLoggingIn ? "Logging In..." : "Log In"}
           </Button>
         </form>
         <div className="my-4 flex items-center">
@@ -102,16 +132,19 @@ export default function LoginPage() {
           <div className="flex-grow border-t border-muted" />
         </div>
         <div className="space-y-2">
-            <Button variant="outline" className="w-full" asChild>
+            <Button variant="outline" className="w-full" asChild disabled={isLoading}>
                 <a href={googleAuthUrl}>
                     <FaGoogle className="mr-2"/> Log in with Google
                 </a>
+            </Button>
+            <Button variant="secondary" className="w-full" onClick={handleGuestLogin} disabled={isLoading}>
+              {isGuestLoading ? "Entering..." : "Continue as Guest"}
             </Button>
         </div>
       </CardContent>
       <CardFooter className="flex justify-center text-sm">
         <p className="text-muted-foreground">
-          Don&apos;t have an account?{" "}
+          Don't have an account?{" "}
           <Link href="/register" className="text-primary hover:underline font-medium">
             Sign Up
           </Link>

@@ -41,7 +41,7 @@ const mobileNavItems = [
   { href: "/dashboard", icon: Home, label: "Dashboard" },
   { href: "/dashboard/reports", icon: FileText, label: "My Reports" },
   { href: "/dashboard/team", icon: Users, label: "Team" },
-  { href: "/dashboard/billing", icon: CreditCard, label: "Billing" },
+  //{ href: "/dashboard/billing", icon: CreditCard, label: "Billing" },
   { href: "/dashboard/settings", icon: Settings, label: "Settings" },
   { href: "/dashboard/support", icon: LifeBuoy, label: "Support" },
 ];
@@ -137,7 +137,7 @@ export function Header() {
                 <DropdownMenuSeparator />
                 <DropdownMenuGroup>
                     <DropdownMenuItem asChild><Link href="/dashboard/settings"><Settings className="mr-2 h-4 w-4" />Settings</Link></DropdownMenuItem>
-                    <DropdownMenuItem asChild><Link href="/dashboard/billing"><CreditCard className="mr-2 h-4 w-4" />Billing</Link></DropdownMenuItem>
+                    {/* <DropdownMenuItem asChild><Link href="/dashboard/billing"><CreditCard className="mr-2 h-4 w-4" />Billing</Link></DropdownMenuItem> */}
                     <DropdownMenuItem asChild><Link href="/dashboard/support"><LifeBuoy className="mr-2 h-4 w-4" />Support</Link></DropdownMenuItem>
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />

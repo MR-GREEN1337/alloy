@@ -1,7 +1,7 @@
 from __future__ import annotations
 import enum
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone # Import timezone
 from sqlmodel import Field, SQLModel, Relationship as SQLModelRelationship
 from sqlalchemy.orm import relationship
 from sqlalchemy import Column, DateTime, func, TEXT, JSON
@@ -44,7 +44,8 @@ class Report(SQLModel, table=True):
     target_brand: Optional[str] = Field(default=None)
     status: ReportStatus = Field(default=ReportStatus.DRAFT, sa_column=Column(TEXT, nullable=False))
     extracted_file_context: Optional[str] = Field(default=None, sa_column=Column(TEXT))
-    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime(timezone=True), server_default=func.now(), nullable=False))
+    # Use timezone aware now()
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), server_default=func.now(), nullable=False))
     updated_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False))
     user_id: int = Field(foreign_key="user.id")
 
@@ -64,7 +65,21 @@ class ReportAnalysis(SQLModel, table=True):
     search_sources: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON))
     acquirer_sources: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON))
     target_sources: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON))
+
+    # Corporate culture fields
+    acquirer_corporate_profile: Optional[str] = Field(default=None, sa_column=Column(TEXT))
+    target_corporate_profile: Optional[str] = Field(default=None, sa_column=Column(TEXT))
+    corporate_ethos_summary: Optional[str] = Field(default=None, sa_column=Column(TEXT))
+    acquirer_culture_sources: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON))
+    target_culture_sources: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON))
     
+    # Financial analysis fields
+    acquirer_financial_profile: Optional[str] = Field(default=None, sa_column=Column(TEXT))
+    target_financial_profile: Optional[str] = Field(default=None, sa_column=Column(TEXT))
+    financial_synthesis: Optional[str] = Field(default=None, sa_column=Column(TEXT))
+    acquirer_financial_sources: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON))
+    target_financial_sources: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON))
+
     report: "Report" = SQLModelRelationship(sa_relationship=relationship("Report", back_populates="analysis"))
 
 class CultureClash(SQLModel, table=True):

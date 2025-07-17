@@ -6,6 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from urllib.parse import urlencode
 import httpx
 from loguru import logger
+import uuid
+import random
 
 from src.core.security import (
     create_access_token,
@@ -45,6 +47,12 @@ GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 GOOGLE_SCOPES = "openid email profile"
+
+# --- Guest Mode Constants ---
+GUEST_NAMES = [
+    "Curious Capybara", "Analytical Aardvark", "Synergy Shark", 
+    "Due Diligence Duck", "Strategic Squirrel", "Data-driven Dingo"
+]
 
 # --- Helper Function ---
 async def create_user_if_not_exists(session: AsyncSession, user_data: Dict[str, Any]) -> models.User:
@@ -186,6 +194,41 @@ async def google_callback(
     frontend_redirect_url = f"{settings.CORS_ORIGINS[0]}/token?{params}"
     
     return RedirectResponse(url=frontend_redirect_url)
+
+@router.post("/guest", response_model=Token, tags=["auth"])
+async def guest_login(session: DBSession):
+    """Creates a temporary guest user and returns auth tokens. For the sake of demo, guest users are created with random names and emails."""
+    guest_email = f"guest_{uuid.uuid4()}@alloy.dev"
+    guest_name = random.choice(GUEST_NAMES)
+    
+    logger.info(f"Creating new guest user: {guest_name} ({guest_email})")
+    
+    # Guest users don't have passwords
+    guest_user = models.User(
+        email=guest_email,
+        full_name=guest_name,
+        is_active=True, 
+        hashed_password=None
+    )
+    
+    try:
+        session.add(guest_user)
+        await session.commit()
+        await session.refresh(guest_user)
+    except Exception as e:
+        await session.rollback()
+        logger.error(f"Error creating guest user: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not create guest account."
+        )
+
+    token_data = {"sub": guest_user.email, "full_name": guest_user.full_name}
+    return Token(
+        access_token=create_access_token(data=token_data),
+        refresh_token=create_refresh_token(data=token_data),
+        token_type="bearer"
+    )
 
 async def get_current_user(
     token: Annotated[str, Header(alias="Authorization")],

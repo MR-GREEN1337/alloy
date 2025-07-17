@@ -1,9 +1,11 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
+import os
 
 class Settings(BaseSettings):
-    class Config:
-        env_file = ".env"
+    model_config = SettingsConfigDict(
+        env_file=".env.test" if os.getenv("ENVIRONMENT") == "test" else ".env"
+    )
 
     ENVIRONMENT: str = "development"
     DEBUG: bool = True

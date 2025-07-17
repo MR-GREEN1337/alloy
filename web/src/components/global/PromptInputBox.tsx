@@ -18,7 +18,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../ui/collapsible";
 
-// API MUTATION
+// API MUTATIONs
 const createDraftReport = async (url: string, { arg }: { arg: { token: string }}) => {
     const res = await fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${arg.token}` } });
     if (!res.ok) throw new Error('Failed to create draft session.');
@@ -27,7 +27,7 @@ const createDraftReport = async (url: string, { arg }: { arg: { token: string }}
 
 // TYPES
 interface Step {
-  id: string;
+  id: string; // Should be unique
   status: 'info' | 'search' | 'source' | 'analysis' | 'reasoning' | 'synthesis' | 'saving' | 'complete' | 'error';
   message?: string;
   payload?: any;
@@ -74,7 +74,7 @@ const FaviconPreview = ({ url }: { url: string }) => {
 
 const StepItem = ({ step }: { step: Step }) => {
     const ICONS = {
-        info: <Bot className="h-4 w-4 text-primary" />,
+        info: <Bot className="h-4 w-4 text-foreground" />,
         search: <Search className="h-4 w-4 text-blue-500" />,
         source: <LinkIcon className="h-4 w-4 text-muted-foreground" />,
         analysis: <Microscope className="h-4 w-4 text-purple-500" />,
@@ -87,7 +87,7 @@ const StepItem = ({ step }: { step: Step }) => {
 
     const renderContent = () => {
         if (step.status === 'source' && step.payload) {
-            return <SourceItem source={step.payload} />;
+            return <SourceItem source={{ url: step.payload.url, title: step.payload.title }} />;
         }
         return step.message;
     };

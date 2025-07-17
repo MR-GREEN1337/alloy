@@ -6,6 +6,7 @@ venv/
 .ruff_cache/
 .mypy_cache/
 build/
+.pytest_cache/
 
 # Node.js
 node_modules/
@@ -48,4 +49,4 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-syntra_context.txt
+claude_context.txt

@@ -1,7 +1,7 @@
 import google.generativeai as genai
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.units import inch
-from reportlab.lib import colors # CORE FIX: Add the missing import
+from reportlab.lib import colors
 from datetime import datetime
 import io
 import json
@@ -14,6 +14,8 @@ from src.services.pdf_template import (
     create_header,
     create_title_section,
     create_key_metrics_table,
+    create_corporate_culture_section,
+    create_financial_analysis_section,
     create_clashes_table,
     create_growth_table
 )
@@ -21,53 +23,6 @@ from src.services.pdf_template import (
 settings = get_settings()
 genai.configure(api_key=settings.GEMINI_API_KEY)
 
-async def generate_qualitative_summary(report_data: dict) -> dict:
-    """Uses Gemini to generate the strategic summary and brand archetypes."""
-    logger.info("Generating qualitative summaries with Gemini...")
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    
-    prompt_data = {
-        "acquirer_brand": report_data["acquirer_brand"],
-        "target_brand": report_data["target_brand"],
-        "affinity_overlap_score": report_data["affinity_overlap_score"],
-        "top_culture_clashes": [
-            {"topic": c["topic"], "severity": c["severity"]} for c in report_data.get("culture_clashes", [])[:5]
-        ],
-        "top_growth_opportunities": [
-            g["description"] for g in report_data.get("untapped_growths", [])[:5]
-        ]
-    }
-    
-    prompt = f"""
-    You are an expert M&A analyst from a top-tier investment bank.
-    Your task is to write the qualitative sections of a cultural due diligence report based on the provided data points.
-    The tone should be professional, insightful, and data-driven.
-
-    **Instructions:**
-    1.  Write a "Strategic Summary" that synthesizes the provided data into a concise, executive-level overview. Highlight the key risks (from clashes) and opportunities (from growth areas).
-    2.  Write a "Brand Archetype" for both the acquirer and the target. This should be a short, insightful paragraph for each, deducing their brand's 'personality' from the data.
-    3.  Return the output as a single, valid JSON object with two keys: "strategic_summary" and "brand_archetypes". The "brand_archetypes" key should contain an object with "acquirer" and "target" keys.
-
-    **Input Data:**
-    ```json
-    {json.dumps(prompt_data, indent=2)}
-    ```
-
-    **JSON Output:**
-    """
-    
-    try:
-        response = await model.generate_content_async(prompt, generation_config={"response_mime_type": "application/json"})
-        return json.loads(response.text)
-    except Exception as e:
-        logger.error(f"Failed to generate qualitative summary with Gemini: {e}")
-        return {
-            "strategic_summary": "Analysis generated, but AI-powered qualitative summary could not be completed.",
-            "brand_archetypes": {
-                "acquirer": "Data unavailable.",
-                "target": "Data unavailable."
-            }
-        }
 
 def create_report_pdf(report: models.Report, llm_summary: dict) -> bytes:
     """
@@ -89,10 +44,15 @@ def create_report_pdf(report: models.Report, llm_summary: dict) -> bytes:
     story.extend(create_title_section(report, styles))
     story.extend(create_key_metrics_table(report, doc.width, styles))
     
+    # --- Main Qualitative Summaries ---
     story.append(Paragraph("Strategic Summary", styles['h2']))
     story.append(Paragraph(llm_summary.get("strategic_summary", "N/A").replace('\n', '<br/>'), styles['default']))
     story.append(Spacer(1, 0.3*inch))
     
+    # Add the new sections
+    story.extend(create_financial_analysis_section(llm_summary, styles))
+    story.extend(create_corporate_culture_section(report, llm_summary, doc.width, styles))
+
     story.append(Paragraph("Brand Archetypes", styles['h2']))
     archetypes = llm_summary.get("brand_archetypes", {})
     story.append(Paragraph(report.acquirer_brand, styles['h3']))
@@ -102,6 +62,7 @@ def create_report_pdf(report: models.Report, llm_summary: dict) -> bytes:
     story.append(Paragraph(archetypes.get('target', 'N/A'), styles['default']))
     story.append(Spacer(1, 0.3*inch))
 
+    # --- Detailed Data Tables ---
     story.extend(create_clashes_table(report, doc.width, styles))
     story.extend(create_growth_table(report, doc.width, styles))
     

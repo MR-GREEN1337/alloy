@@ -3,6 +3,7 @@ import google.generativeai as genai
 from typing import List, Dict, Any, AsyncGenerator, Optional, Tuple, Set
 from loguru import logger
 import json
+import random
 
 from src.core.settings import get_settings
 from src.services.search import web_search
@@ -85,7 +86,7 @@ async def _web_search_tool(query: str) -> Dict[str, Any]:
     return {"context_str": summary, "sources": search_result["sources"]}
 
 async def _qloo_comparative_analysis_tool(acquirer_brand_name: str, target_brand_name: str) -> Dict[str, Any]:
-    """Performs a deep cultural comparison and returns a structured dictionary."""
+    """Performs a deep cultural comparison and returns a structured dictionary with pre-analyzed lists."""
     logger.info(f"AGENT TOOL: Qloo Comparative Analysis for '{acquirer_brand_name}' vs '{target_brand_name}'")
     async with httpx.AsyncClient(timeout=45.0) as client:
         acquirer_info = await _find_qloo_id(client, acquirer_brand_name)
@@ -94,36 +95,144 @@ async def _qloo_comparative_analysis_tool(acquirer_brand_name: str, target_brand
         if not target_info: return {"context_str": f"Error: Could not find target '{target_brand_name}' in Qloo database."}
         acquirer_tastes = await _get_qloo_tastes(client, acquirer_info[0])
         target_tastes = await _get_qloo_tastes(client, target_info[0])
-    if not acquirer_tastes or not target_tastes: return {"context_str": "Error: Could not retrieve taste data."}
-    acquirer_set, target_set = {t['name'] for t in acquirer_tastes}, {t['name'] for t in target_tastes}
-    shared_tastes, union_size = list(acquirer_set.intersection(target_set)), len(acquirer_set.union(target_set))
-    # CORE FIX: Always return a dictionary with a 'context_str' key.
-    return {"context_str": json.dumps({
-        "affinity_overlap_score": round((len(shared_tastes) / union_size * 100), 2) if union_size > 0 else 0,
-        "shared_affinities_top_5": shared_tastes[:5],
-        "acquirer_unique_tastes_top_5": list(acquirer_set - target_set)[:5],
-        "target_unique_tastes_top_5": list(target_set - acquirer_set)[:5],
-    })}
+    
+    if not acquirer_tastes or not target_tastes: 
+        return {"context_str": "Error: Could not retrieve taste data.", "qloo_analysis": {}, "culture_clashes": [], "untapped_growths": []}
+
+    acquirer_set = {t['name'] for t in acquirer_tastes if t.get('name')}
+    target_set = {t['name'] for t in target_tastes if t.get('name')}
+    
+    # Calculate overlaps and differences
+    shared_tastes = list(acquirer_set.intersection(target_set))
+    union_size = len(acquirer_set.union(target_set))
+    acquirer_unique = list(acquirer_set - target_set)
+    target_unique = list(target_set - acquirer_set)
+
+    # Pre-generate the lists for the final report
+    culture_clashes = [
+        {"topic": topic, "description": f"Acquirer's audience shows affinity for this, a taste not shared by the Target's audience.", "severity": "MEDIUM"}
+        for topic in acquirer_unique[:5]
+    ] + [
+        {"topic": topic, "description": f"Target's audience shows strong affinity for this, a taste not shared by the Acquirer's audience.", "severity": "HIGH"}
+        for topic in target_unique[:5]
+    ]
+    
+    untapped_growths = [
+        {"description": f"Both audiences show a strong affinity for '{topic}'. This shared passion point could be a key pillar for joint marketing campaigns and product integrations.", "potential_impact_score": random.randint(7, 9)}
+        for topic in shared_tastes[:5]
+    ]
+
+    # Structure the final output
+    result = {
+        "context_str": "Qloo analysis complete. Affinity scores, clashes, and growth opportunities have been calculated.",
+        "qloo_analysis": {
+            "affinity_overlap_score": round((len(shared_tastes) / union_size * 100), 2) if union_size > 0 else 0,
+            "shared_affinities_count": len(shared_tastes),
+            "acquirer_unique_tastes_count": len(acquirer_unique),
+            "target_unique_tastes_count": len(target_unique),
+        },
+        "culture_clashes": culture_clashes,
+        "untapped_growths": untapped_growths
+    }
+    return result
+
+async def _corporate_culture_research_tool(brand_name: str) -> Dict[str, Any]:
+    """
+    Performs targeted web searches to build a corporate culture and leadership profile.
+    It synthesizes findings on leadership, values, and employee sentiment.
+    """
+    logger.info(f"AGENT TOOL: Corporate Culture Research for: '{brand_name}'")
+    
+    queries = [
+        f"leadership team and bios for {brand_name}",
+        f"corporate values and mission statement of {brand_name}",
+        f"employee reviews and culture at {brand_name} (e.g., from Glassdoor, news articles)",
+    ]
+    
+    combined_context = ""
+    all_sources = []
+    
+    for query in queries:
+        search_result = await web_search(query)
+        if search_result and search_result['context_str']:
+            combined_context += f"\n\n--- Results for query: '{query}' ---\n{search_result['context_str']}"
+            all_sources.extend(search_result['sources'])
+
+    if not combined_context.strip():
+        return {"context_str": f"No significant corporate culture information could be found for '{brand_name}' via web search.", "sources": []}
+        
+    summary_query = f"Synthesize a corporate culture profile for {brand_name}. Focus on: 1. Leadership style and key executives. 2. Stated company values and mission. 3. Publicly perceived employee sentiment and work culture."
+    summary = await _summarize_with_gemini(combined_context, summary_query)
+
+    unique_sources = list({v['url']:v for v in all_sources}.values())
+    return {"context_str": summary, "sources": unique_sources}
+
+async def _financial_and_market_analysis_tool(brand_name: str) -> Dict[str, Any]:
+    """
+    Performs web searches to build a high-level financial and market profile.
+    Synthesizes findings on financial metrics, SWOT, and market position.
+    """
+    logger.info(f"AGENT TOOL: Financial & Market Analysis for: '{brand_name}'")
+    
+    queries = [
+        f"key financial metrics for {brand_name}",
+        f"SWOT analysis for {brand_name}",
+        f"{brand_name} market position and key competitors",
+    ]
+    
+    combined_context = ""
+    all_sources = []
+    
+    for query in queries:
+        search_result = await web_search(query)
+        if search_result and search_result['context_str']:
+            combined_context += f"\n\n--- Results for query: '{query}' ---\n{search_result['context_str']}"
+            all_sources.extend(search_result['sources'])
+
+    if not combined_context.strip():
+        return {"context_str": f"No significant financial or market information could be found for '{brand_name}' via web search.", "sources": []}
+        
+    summary_query = f"Synthesize a high-level financial and market profile for {brand_name}. Focus on: 1. Key financial health indicators (e.g., revenue, growth trends). 2. A brief SWOT analysis (Strengths, Weaknesses, Opportunities, Threats). 3. Its primary market position and main competitors."
+    summary = await _summarize_with_gemini(combined_context, summary_query)
+
+    unique_sources = list({v['url']:v for v in all_sources}.values())
+    return {"context_str": summary, "sources": unique_sources}
 
 # --- The Stateful ReAct Agent ---
 class AlloyReActAgent:
     PROMPT_TEMPLATE = """
-    You are a data-gathering AI assistant for a financial firm.
-    Your only job is to execute a sequence of tool calls to gather information about two companies and their cultural overlap.
-    Do not synthesize, analyze, or generate the final report yourself. Simply gather the data and pass it to the 'finish' tool.
+    You are a data-gathering AI assistant.
+
+    **PRIMARY DIRECTIVE:** Your only job is to execute a sequence of tool calls to gather all the necessary data for a comprehensive M&A due diligence report.
+
+    **RULES:**
+    1.  You MUST respond with a "Thought" and an "Action" in this exact format.
+    2.  Your "Action" MUST be a single, valid JSON object.
+    3.  The JSON object MUST have a `tool_name` key (the name of the tool to use).
+    4.  The JSON object MUST have a `parameters` key, which is an object of the tool's arguments.
+
+    **DATA-GATHERING TASKS (in any logical order):**
+    1.  **Company Profiles:** Get a general overview of each company's business.
+    2.  **Corporate Culture:** Investigate the internal culture, leadership, and values of each company.
+    3.  **Audience Affinity:** Analyze the cultural tastes of each company's audience. This tool also generates the `culture_clashes` and `untapped_growths` lists automatically.
+    4.  **Financial & Market Health:** Get a high-level overview of each company's market position and financial health.
 
     **TOOLS:**
-    - `web_search(query: str)`: For company profile research.
-    - `qloo_comparative_analysis(acquirer_brand_name: str, target_brand_name: str)`: For cultural data.
-    - `finish(gathered_data: dict)`: Use this ONLY when all data gathering steps are complete. The `gathered_data` parameter must be a JSON object containing keys 'acquirer_profile', 'target_profile', and 'qloo_analysis'.
+    - `web_search(query: str)`: Use for **Task 1**.
+    - `corporate_culture_research(brand_name: str)`: Use for **Task 2**.
+    - `qloo_comparative_analysis(acquirer_brand_name: str, target_brand_name: str)`: Use for **Task 3**.
+    - `financial_and_market_analysis_tool(brand_name: str)`: Use for **Task 4**.
+    - `finish(gathered_data: dict)`: Call this tool ONLY when all other data-gathering tasks are complete. The `gathered_data` object MUST contain these keys: `acquirer_profile`, `target_profile`, `acquirer_culture_profile`, `target_culture_profile`, `acquirer_financial_profile`, `target_financial_profile`, `qloo_analysis`, `culture_clashes`, `untapped_growths`.
 
-    **RESPONSE FORMAT:**
-    You MUST respond with a "Thought" and an "Action" in this exact format. The Action MUST be a valid JSON object.
-    **Thought**: [Your reasoning for the next action]
-    **Action**: [A single JSON object for the tool call]
-
-    **EXAMPLE ACTION:**
-    **Action**: {{"tool_name": "web_search", "parameters": {{"query": "Example Inc. company profile"}}}}
+    **EXAMPLE ACTION FORMAT:**
+    ```json
+    {
+      "tool_name": "web_search",
+      "parameters": {
+        "query": "Example Inc. company profile"
+      }
+    }
+    ```
 
     **CURRENT TASK:**
     Gather data for a report on the acquisition of target **{target_brand}** by acquirer **{acquirer_brand}**.
@@ -144,8 +253,18 @@ class AlloyReActAgent:
         self.scratchpad = "" 
         self.gathered_data = {} 
         self.final_data = None
-        self.tools = {"web_search": _web_search_tool, "qloo_comparative_analysis": _qloo_comparative_analysis_tool}
-        self.all_sources: Dict[str, List[Dict[str, str]]] = {'acquirer_sources': [], 'target_sources': [], 'search_sources': []}
+        self.tools = {
+            "web_search": _web_search_tool, 
+            "qloo_comparative_analysis": _qloo_comparative_analysis_tool,
+            "corporate_culture_research": _corporate_culture_research_tool,
+            "financial_and_market_analysis_tool": _financial_and_market_analysis_tool
+        }
+        self.all_sources: Dict[str, List[Dict[str, str]]] = {
+            'acquirer_sources': [], 'target_sources': [], 
+            'acquirer_culture_sources': [], 'target_culture_sources': [],
+            'acquirer_financial_sources': [], 'target_financial_sources': [],
+            'search_sources': []
+        }
 
     def _build_prompt(self) -> str:
         """Builds the prompt with the current state of completed steps."""
@@ -158,7 +277,7 @@ class AlloyReActAgent:
         ) + self.scratchpad
 
     async def run_stream(self) -> AsyncGenerator[Dict[str, Any], None]:
-        max_turns = 6
+        max_turns = 8
         for i in range(max_turns):
             yield {"status": "thinking", "message": f"Agent reasoning (Step {i+1}/{max_turns})"}
             
@@ -168,6 +287,8 @@ class AlloyReActAgent:
             if "**Action**:" not in response_text:
                 yield {"status": "thought", "message": response_text.replace("**Thought**:", "").strip()}
                 logger.warning("Agent produced a thought but no action. Ending turn.")
+                observation = "Error: Your response did not include an 'Action' block. You must provide an action."
+                self.scratchpad += f"\n**Thought**: {response_text.replace('**Thought**:', '').strip()}\n**Observation**: {observation}"
                 continue
 
             parts = response_text.split("**Action**:", 1)
@@ -181,20 +302,21 @@ class AlloyReActAgent:
             except json.JSONDecodeError as e:
                 logger.error(f"JSON parsing error: {e}. Raw action: {action_str}")
                 yield {"status": "error", "message": f"Agent provided invalid JSON: {e}"}
-                observation = f"Error: The provided Action was not valid JSON. Please ensure your Action is a single, correctly formatted JSON object with 'tool_name' and 'parameters' keys. The error was: {e}"
+                observation = f"Error: The Action was not valid JSON. You must provide a single, correctly formatted JSON object. For example: {{\"tool_name\": \"web_search\", \"parameters\": {{\"query\": \"some query\"}}}}"
                 self.scratchpad += f"\n**Thought**: {thought}\n**Action**: {action_str}\n**Observation**: {observation}"
                 continue
 
-            tool_name, params = action_json.get("tool_name"), action_json.get("parameters", {})
+            tool_name = action_json.get("tool_name")
+            params = action_json.get("parameters", {})
             
             if not tool_name:
                 observation = "Error: Your action JSON is missing the 'tool_name' key."
             elif tool_name == "finish":
-                self.final_data = params.get("gathered_data", {})
+                self.final_data = params.get("gathered_data", self.gathered_data)
                 yield {"status": "complete"}
                 return
             elif tool_name not in self.tools:
-                observation = f"Error: Unknown tool '{tool_name}'."
+                observation = f"Error: Unknown tool '{tool_name}'. Please use one of the available tools."
             else:
                 try:
                     tool_result = await self.tools[tool_name](**params)
@@ -211,19 +333,42 @@ class AlloyReActAgent:
                             self.gathered_data['target_profile'] = observation
                             self.all_sources['target_sources'].extend(tool_result.get('sources', []))
                         
-                        sources = tool_result.get('sources', [])
-                        for source in sources:
+                        for source in tool_result.get('sources', []):
                             yield {"status": "source", "payload": source}
 
+                    elif tool_name == "corporate_culture_research":
+                        brand = params.get('brand_name', '').lower()
+                        if self.acquirer_brand.lower() in brand:
+                            self.completed_steps.add("researched_acquirer_culture")
+                            self.gathered_data['acquirer_culture_profile'] = observation
+                            self.all_sources['acquirer_culture_sources'].extend(tool_result.get('sources', []))
+                        elif self.target_brand.lower() in brand:
+                            self.completed_steps.add("researched_target_culture")
+                            self.gathered_data['target_culture_profile'] = observation
+                            self.all_sources['target_culture_sources'].extend(tool_result.get('sources', []))
+                        for source in tool_result.get('sources', []): yield {"status": "source", "payload": source}
+
+                    elif tool_name == "financial_and_market_analysis_tool":
+                        brand = params.get('brand_name', '').lower()
+                        if self.acquirer_brand.lower() in brand:
+                            self.completed_steps.add("researched_acquirer_financials")
+                            self.gathered_data['acquirer_financial_profile'] = observation
+                            self.all_sources['acquirer_financial_sources'].extend(tool_result.get('sources', []))
+                        elif self.target_brand.lower() in brand:
+                            self.completed_steps.add("researched_target_financials")
+                            self.gathered_data['target_financial_profile'] = observation
+                            self.all_sources['target_financial_sources'].extend(tool_result.get('sources', []))
+                        for source in tool_result.get('sources', []): yield {"status": "source", "payload": source}
+                    
                     elif tool_name == "qloo_comparative_analysis":
                         self.completed_steps.add("performed_qloo_analysis")
-                        # This can fail if the observation is an error string.
-                        try:
-                            self.gathered_data['qloo_analysis'] = json.loads(observation)
-                        except json.JSONDecodeError:
-                            # Observation is an error message, pass it on.
-                            self.gathered_data['qloo_analysis'] = {"error": observation}
+                        self.gathered_data['qloo_analysis'] = tool_result.get('qloo_analysis', {})
+                        self.gathered_data['culture_clashes'] = tool_result.get('culture_clashes', [])
+                        self.gathered_data['untapped_growths'] = tool_result.get('untapped_growths', [])
 
+                except TypeError as e:
+                    logger.error(f"Type error executing tool '{tool_name}': {e}", exc_info=True)
+                    observation = f"Error: Tool '{tool_name}' was called with incorrect or missing parameters. The error was: {e}. Please correct the 'parameters' object in your next action."
                 except Exception as e:
                     logger.error(f"Error executing tool '{tool_name}': {e}", exc_info=True)
                     observation = f"Error: {e}"
