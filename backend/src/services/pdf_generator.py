@@ -1,6 +1,7 @@
 import google.generativeai as genai
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.units import inch
+from reportlab.lib import colors # CORE FIX: Add the missing import
 from datetime import datetime
 import io
 import json
@@ -25,7 +26,6 @@ async def generate_qualitative_summary(report_data: dict) -> dict:
     logger.info("Generating qualitative summaries with Gemini...")
     model = genai.GenerativeModel('gemini-1.5-flash')
     
-    # Create a simplified JSON for the LLM prompt, focusing on what it needs
     prompt_data = {
         "acquirer_brand": report_data["acquirer_brand"],
         "target_brand": report_data["target_brand"],
@@ -58,11 +58,9 @@ async def generate_qualitative_summary(report_data: dict) -> dict:
     
     try:
         response = await model.generate_content_async(prompt, generation_config={"response_mime_type": "application/json"})
-        logger.success("Successfully generated qualitative summary from Gemini.")
         return json.loads(response.text)
     except Exception as e:
         logger.error(f"Failed to generate qualitative summary with Gemini: {e}")
-        # Fallback to a default summary in case of LLM failure
         return {
             "strategic_summary": "Analysis generated, but AI-powered qualitative summary could not be completed.",
             "brand_archetypes": {
@@ -82,19 +80,15 @@ def create_report_pdf(report: models.Report, llm_summary: dict) -> bytes:
                             rightMargin=0.75*inch,
                             leftMargin=0.75*inch,
                             topMargin=0.75*inch,
-                            bottomMargin=1.0*inch) # Increased bottom margin for footer
+                            bottomMargin=1.0*inch)
     
     styles = get_pdf_styles()
     story = []
 
-    # --- Static Header & Title ---
     story.extend(create_header(styles))
     story.extend(create_title_section(report, styles))
-    
-    # --- Static Key Metrics Table ---
     story.extend(create_key_metrics_table(report, doc.width, styles))
     
-    # --- Dynamic LLM Content ---
     story.append(Paragraph("Strategic Summary", styles['h2']))
     story.append(Paragraph(llm_summary.get("strategic_summary", "N/A").replace('\n', '<br/>'), styles['default']))
     story.append(Spacer(1, 0.3*inch))
@@ -108,11 +102,9 @@ def create_report_pdf(report: models.Report, llm_summary: dict) -> bytes:
     story.append(Paragraph(archetypes.get('target', 'N/A'), styles['default']))
     story.append(Spacer(1, 0.3*inch))
 
-    # --- Static Tables ---
     story.extend(create_clashes_table(report, doc.width, styles))
     story.extend(create_growth_table(report, doc.width, styles))
     
-    # --- Footer ---
     def on_page(canvas, doc):
         canvas.saveState()
         canvas.setFont('Helvetica', 8)

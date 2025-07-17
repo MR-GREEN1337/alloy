@@ -714,34 +714,27 @@ from fastapi.responses import RedirectResponse
 import httpx
 from typing import Optional
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, urljoin, urlencode
+from urllib.parse import urlparse, urljoin
 from loguru import logger
 
-from src.services.search import find_official_website
 from src.core.settings import get_settings
+from src.services.search import find_official_website
 
 router = APIRouter()
 settings = get_settings()
 
 async def fetch_with_scraper(client: httpx.AsyncClient, url: str) -> httpx.Response:
-    """Fetches a URL using ScraperAPI to bypass blocking."""
     if not settings.SCRAPER_API_KEY or settings.SCRAPER_API_KEY == "YOUR_SCRAPER_API_KEY_HERE":
         logger.warning("ScraperAPI key not configured. Attempting direct request.")
         return await client.get(url, timeout=10)
-
     logger.info(f"Using ScraperAPI for URL: {url}")
     scraper_url = "http://api.scraperapi.com"
-    params = {
-        'api_key': settings.SCRAPER_API_KEY,
-        'url': url
-    }
+    params = {'api_key': settings.SCRAPER_API_KEY, 'url': url}
     return await client.get(scraper_url, params=params, timeout=30)
 
 async def find_favicon_url(url: str, client: httpx.AsyncClient) -> Optional[str]:
-    """Helper to find the favicon URL."""
     base_url = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
     ico_url = urljoin(base_url, "/favicon.ico")
-    
     try:
         ico_check = await client.head(ico_url, timeout=5)
         if ico_check.status_code == 200 and 'image' in ico_check.headers.get('content-type', ''):
@@ -749,66 +742,67 @@ async def find_favicon_url(url: str, client: httpx.AsyncClient) -> Optional[str]
             return ico_url
     except httpx.RequestError:
         pass
-
     logger.info(f"Checking HTML for favicon link in {url}")
     try:
         response = await client.get(url, timeout=10)
         response.raise_for_status()
     except httpx.HTTPStatusError as e:
-        if e.response.status_code == 403:
-            logger.warning(f"Direct access to {url} forbidden (403). Retrying with scraper API.")
+        if e.response.status_code in [401, 403]:
+            logger.warning(f"Direct access to {url} failed ({e.response.status_code}). Retrying with scraper.")
             response = await fetch_with_scraper(client, url)
             response.raise_for_status()
         else:
             raise
-    
     soup = BeautifulSoup(response.text, "html.parser")
-    
     icon_rels = ["icon", "shortcut icon", "apple-touch-icon"]
-    icon_link = None
-    for rel in icon_rels:
-        icon_link = soup.find("link", rel=rel)
-        if icon_link:
-            break
-
+    icon_link = soup.find("link", rel=lambda r: r and r.lower() in icon_rels)
     if icon_link and icon_link.has_attr("href"):
         favicon_href = icon_link["href"]
         favicon_url = urljoin(str(response.url), favicon_href)
         logger.success(f"Successfully found favicon for {url} at {favicon_url}")
         return favicon_url
-    
     return None
 
 @router.get("/favicon", response_class=RedirectResponse, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
-async def get_favicon(brand_name: str = Query(..., alias="brandName")) -> RedirectResponse:
-    """Finds the official website for a brand, then finds and redirects to its favicon."""
-    logger.info(f"Initiating favicon search for brand: '{brand_name}'")
+async def get_favicon(
+    url: Optional[str] = Query(None),
+    brandName: Optional[str] = Query(None)
+) -> RedirectResponse:
+    """
+    Finds and redirects to the favicon for a given URL or brand name.
+    Prioritizes brandName if both are provided.
+    """
+    if not brandName and not url:
+        raise HTTPException(status_code=400, detail="Either 'url' or 'brandName' query parameter is required.")
 
-    url = await find_official_website(brand_name)
-    if not url:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Could not find an official website for '{brand_name}'.")
+    final_url = url
+    if brandName:
+        logger.info(f"Initiating favicon search for brand: '{brandName}'")
+        final_url = await find_official_website(brandName)
+        if not final_url:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Could not find an official website for '{brandName}'.")
+    
+    if not final_url:
+        raise HTTPException(status_code=400, detail="Invalid URL provided.")
 
-    if not url.startswith('http'):
-        url = 'https://' + url
+    if not final_url.startswith('http'):
+        final_url = 'https://' + final_url
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
-
     async with httpx.AsyncClient(follow_redirects=True, headers=headers) as client:
         try:
-            favicon_url = await find_favicon_url(url, client)
+            favicon_url = await find_favicon_url(final_url, client)
             if favicon_url:
                 return RedirectResponse(url=favicon_url)
-            
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Favicon not found in HTML or at default location for the discovered website.")
-
+            raise HTTPException(status_code=404, detail="Favicon not found for the discovered URL.")
         except httpx.RequestError as e:
-            logger.warning(f"Could not fetch discovered URL {url} for brand '{brand_name}': {e}")
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Could not fetch the discovered website URL: {e}")
+            logger.warning(f"Could not fetch URL {final_url}: {e}")
+            raise HTTPException(status_code=400, detail=f"Could not fetch the provided URL: {e}")
         except Exception as e:
-            logger.error(f"An unexpected error occurred while fetching favicon for {brand_name}: {e}")
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An internal error occurred.")-e 
+            logger.error(f"An unexpected error occurred while fetching favicon for {final_url}: {e}")
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An internal error occurred.")-e 
 -e
 
 File: backend/src/api/v1/reports.py
@@ -890,8 +884,8 @@ async def synthesize_final_report(agent_data: dict) -> dict:
 
     **YOUR TASK:**
     Based *only* on the raw data provided, generate a complete report as a single JSON object with the following keys:
-    - "cultural_compatibility_score": A float between 0 and 100. Base this on the affinity_overlap_score and the severity of clashes. A high overlap and low severity clashes should result in a high score.
-    - "affinity_overlap_score": A float, taken directly from the 'qloo_analysis'.
+    - "cultural_compatibility_score": A float between 0 and 100. Base this on the affinity_overlap_score and the severity of clashes. A high overlap and low severity clashes should result in a high score. If Qloo analysis failed, this should be 0.0.
+    - "affinity_overlap_score": A float, taken directly from the 'qloo_analysis'. If it's missing, this should be 0.0.
     - "brand_archetype_summary": An object with "acquirer_archetype" and "target_archetype" strings. Deduce these from their respective profiles.
     - "strategic_summary": A string providing a concise, executive-level overview of the findings, including risks and opportunities.
     - "culture_clashes": A list of objects, each with "topic" (string), "description" (string), and "severity" ('LOW', 'MEDIUM', or 'HIGH'). Derive these from the 'unique_tastes' in the Qloo analysis.
@@ -902,11 +896,15 @@ async def synthesize_final_report(agent_data: dict) -> dict:
     
     try:
         response = await model.generate_content_async(prompt, generation_config={"response_mime_type": "application/json"})
-        return json.loads(response.text)
+        report = json.loads(response.text)
+        report['cultural_compatibility_score'] = report.get('cultural_compatibility_score', 0.0)
+        report['affinity_overlap_score'] = report.get('affinity_overlap_score', 0.0)
+        return report
     except Exception as e:
         logger.error(f"Final report synthesis failed: {e}")
         return {
-            "strategic_summary": "Analysis failed during final synthesis.", "cultural_compatibility_score": 0.0,
+            "strategic_summary": "Analysis failed during final synthesis. Key data may be missing.",
+            "cultural_compatibility_score": 0.0,
             "affinity_overlap_score": agent_data.get('qloo_analysis', {}).get('affinity_overlap_score', 0.0),
             "brand_archetype_summary": {"acquirer_archetype": "N/A", "target_archetype": "N/A"},
             "culture_clashes": [], "untapped_growths": []
@@ -970,7 +968,7 @@ async def generate_full_report_stream(report_id: int, payload: ReportGeneratePay
                 if sse_event: yield sse_event
                 if event.get("status") == "complete": break
             
-            if not agent.final_data: raise Exception("Agent failed to gather data.")
+            if not agent.final_data: agent.final_data = {}
 
             yield f"data: {json.dumps({'status': 'synthesis', 'message': 'Synthesizing final report...'})}\n\n"
             final_report = await synthesize_final_report(agent.final_data)
@@ -983,7 +981,6 @@ async def generate_full_report_stream(report_id: int, payload: ReportGeneratePay
                 if not save_report: raise Exception("Report not found during save.")
                 if save_report.analysis: await save_session.delete(save_report.analysis); await save_session.flush()
                 
-                # CORE FIX: Explicitly serialize dictionary/list fields to JSON strings
                 analysis = models.ReportAnalysis(
                     report_id=save_report.id,
                     cultural_compatibility_score=final_report.get('cultural_compatibility_score', 0.0),
@@ -1006,8 +1003,8 @@ async def generate_full_report_stream(report_id: int, payload: ReportGeneratePay
             
             yield f"data: {json.dumps({'status': 'complete', 'message': 'Report generated successfully!', 'payload': {'reportId': report_id}})}\n\n"
         except Exception as e:
-            error_message = str(e); logger.error(f"Error in report generation stream {report_id}: {error_message}", exc_info=True)
-            yield f"data: {json.dumps({'status': 'error', 'message': f'An unexpected error occurred: {error_message}'})}\n\n"
+            logger.error(f"Error in report generation stream for report {report_id}", exc_info=True)
+            yield f"data: {json.dumps({'status': 'error', 'message': 'An unexpected error occurred during report generation.'})}\n\n"
         finally:
             if not generation_succeeded and report: await mark_report_as_failed(report_id)
 
@@ -1015,14 +1012,39 @@ async def generate_full_report_stream(report_id: int, payload: ReportGeneratePay
 
 @router.get("/{report_id}/download-pdf")
 async def download_report_pdf(report_id: int, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
-    statement = select(models.Report).where(models.Report.id == report_id, models.Report.user_id == current_user.id).options(selectinload(models.Report.analysis), selectinload(models.Report.culture_clashes), selectinload(models.Report.untapped_growths))
+    """Generates and downloads a professional PDF report."""
+    logger.info(f"User {current_user.email} requested PDF for report {report_id}")
+    
+    statement = (
+        select(models.Report)
+        .where(models.Report.id == report_id, models.Report.user_id == current_user.id)
+        .options(
+            selectinload(models.Report.analysis),
+            selectinload(models.Report.culture_clashes),
+            selectinload(models.Report.untapped_growths)
+        )
+    )
     result = await session.execute(statement)
     report = result.scalar_one_or_none()
-    if not report or report.status != models.ReportStatus.COMPLETED: raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found or not complete.")
+    
+    if not report or report.status != models.ReportStatus.COMPLETED or not report.analysis:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found or not complete.")
+
     try:
-        pdf_bytes = create_report_pdf(report)
+        # CORE FIX: The PDF needs the qualitative summary from the LLM.
+        # We can't regenerate it, but we can extract it from the saved analysis.
+        # This simulates the hybrid approach without needing a live agent run.
+        llm_summary = {
+            "strategic_summary": report.analysis.strategic_summary,
+            "brand_archetypes": json.loads(report.analysis.brand_archetype_summary)
+        }
+        
+        pdf_bytes = create_report_pdf(report, llm_summary)
+        
         filename = f"Alloy_Report_{report.acquirer_brand}_vs_{report.target_brand}.pdf"
-        return Response(content=pdf_bytes, media_type="application/pdf", headers={'Content-Disposition': f'attachment; filename="{filename}"'})
+        headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
+        return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
+        
     except Exception as e:
         logger.error(f"Failed to generate PDF for report {report_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to generate PDF report.")
@@ -1399,6 +1421,7 @@ File: backend/src/services/pdf_generator.py
 import google.generativeai as genai
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.units import inch
+from reportlab.lib import colors # CORE FIX: Add the missing import
 from datetime import datetime
 import io
 import json
@@ -1423,7 +1446,6 @@ async def generate_qualitative_summary(report_data: dict) -> dict:
     logger.info("Generating qualitative summaries with Gemini...")
     model = genai.GenerativeModel('gemini-1.5-flash')
     
-    # Create a simplified JSON for the LLM prompt, focusing on what it needs
     prompt_data = {
         "acquirer_brand": report_data["acquirer_brand"],
         "target_brand": report_data["target_brand"],
@@ -1456,11 +1478,9 @@ async def generate_qualitative_summary(report_data: dict) -> dict:
     
     try:
         response = await model.generate_content_async(prompt, generation_config={"response_mime_type": "application/json"})
-        logger.success("Successfully generated qualitative summary from Gemini.")
         return json.loads(response.text)
     except Exception as e:
         logger.error(f"Failed to generate qualitative summary with Gemini: {e}")
-        # Fallback to a default summary in case of LLM failure
         return {
             "strategic_summary": "Analysis generated, but AI-powered qualitative summary could not be completed.",
             "brand_archetypes": {
@@ -1480,19 +1500,15 @@ def create_report_pdf(report: models.Report, llm_summary: dict) -> bytes:
                             rightMargin=0.75*inch,
                             leftMargin=0.75*inch,
                             topMargin=0.75*inch,
-                            bottomMargin=1.0*inch) # Increased bottom margin for footer
+                            bottomMargin=1.0*inch)
     
     styles = get_pdf_styles()
     story = []
 
-    # --- Static Header & Title ---
     story.extend(create_header(styles))
     story.extend(create_title_section(report, styles))
-    
-    # --- Static Key Metrics Table ---
     story.extend(create_key_metrics_table(report, doc.width, styles))
     
-    # --- Dynamic LLM Content ---
     story.append(Paragraph("Strategic Summary", styles['h2']))
     story.append(Paragraph(llm_summary.get("strategic_summary", "N/A").replace('\n', '<br/>'), styles['default']))
     story.append(Spacer(1, 0.3*inch))
@@ -1506,11 +1522,9 @@ def create_report_pdf(report: models.Report, llm_summary: dict) -> bytes:
     story.append(Paragraph(archetypes.get('target', 'N/A'), styles['default']))
     story.append(Spacer(1, 0.3*inch))
 
-    # --- Static Tables ---
     story.extend(create_clashes_table(report, doc.width, styles))
     story.extend(create_growth_table(report, doc.width, styles))
     
-    # --- Footer ---
     def on_page(canvas, doc):
         canvas.saveState()
         canvas.setFont('Helvetica', 8)
@@ -1529,22 +1543,28 @@ def create_report_pdf(report: models.Report, llm_summary: dict) -> bytes:
 
 File: backend/src/services/pdf_template.py
 from reportlab.platypus import Paragraph, Spacer, Table, TableStyle
-from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib import colors
 from reportlab.lib.units import inch
 from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
 
 def get_pdf_styles():
     """Returns a dictionary of styled reportlab ParagraphStyle objects."""
+    # This is a temporary fix, styles should be defined once and passed around.
+    # But for a quick fix, let's redefine it where needed.
+    base_styles = getSampleStyleSheet()
     styles = {
         'default': ParagraphStyle(name='default', fontName='Helvetica', fontSize=10, leading=14),
         'h1': ParagraphStyle(name='h1', fontName='Helvetica-Bold', fontSize=20, alignment=TA_CENTER, spaceAfter=6),
         'h2': ParagraphStyle(name='h2', fontName='Helvetica-Bold', fontSize=14, spaceAfter=12, textColor=colors.HexColor('#0d47a1')),
         'h3': ParagraphStyle(name='h3', fontName='Helvetica-Bold', fontSize=11, spaceAfter=6),
-        'center': ParagraphStyle(name='center', parent=styles.get('default'), alignment=TA_CENTER),
-        'right': ParagraphStyle(name='right', parent=styles.get('default'), alignment=TA_RIGHT),
+        'center': ParagraphStyle(name='center', parent=base_styles['Normal'], alignment=TA_CENTER),
+        'right': ParagraphStyle(name='right', parent=base_styles['Normal'], alignment=TA_RIGHT),
         'small_grey': ParagraphStyle(name='small_grey', fontSize=8, fontName='Helvetica', textColor=colors.grey),
     }
+    # Add center style specifically for key metrics if it's not inheriting correctly
+    styles['center_bold'] = ParagraphStyle(name='center_bold', parent=styles['center'], fontName='Helvetica-Bold')
+
     return styles
 
 def create_header(styles):
@@ -1564,14 +1584,15 @@ def create_title_section(report, styles):
 
 def create_key_metrics_table(report, doc_width, styles):
     """Creates the top-line metrics table."""
+    # CORE FIX: Use the passed-in styles dictionary correctly.
     score_data = [
         [
             Paragraph(f"<font size=24>{report.analysis.cultural_compatibility_score:.0f}</font>/100", styles['center']),
             Paragraph(f"<font size=24>{report.analysis.affinity_overlap_score:.1f}%</font>", styles['center'])
         ],
         [
-            Paragraph("<b>Cultural Compatibility Score</b>", styles['center']),
-            Paragraph("<b>Audience Affinity Overlap</b>", styles['center'])
+            Paragraph("<b>Cultural Compatibility Score</b>", styles['center_bold']),
+            Paragraph("<b>Audience Affinity Overlap</b>", styles['center_bold'])
         ]
     ]
     table = Table(score_data, colWidths=[doc_width / 2.0, doc_width / 2.0], rowHeights=0.6 * inch)
@@ -1599,7 +1620,7 @@ def create_clashes_table(report, doc_width, styles):
         
     table = Table(data, colWidths=[doc_width * 0.2, doc_width * 0.6, doc_width * 0.2])
     table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#263238')), # Dark Blue-Gray
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#263238')), 
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
         ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -1627,7 +1648,7 @@ def create_growth_table(report, doc_width, styles):
 
     table = Table(data, colWidths=[doc_width * 0.8, doc_width * 0.2])
     table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#004d40')), # Dark Teal
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#004d40')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
         ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -2088,6 +2109,179 @@ export default function SettingsPage() {
 }-e 
 -e
 
+File: web/src/app/(pages)/(authed)/dashboard/team/page.tsx
+"use client";
+
+import React from 'react';
+import { Button } from '@/components/ui/button';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+  DialogClose,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { MoreHorizontal, PlusCircle } from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
+import { UserAvatar } from '@/components/global/UserAvatar';
+import { useAuth } from '@/components/global/providers';
+import { toast } from 'sonner';
+
+const teamMembers = [
+  { email: 'founder@alloy.com', name: 'Alex Johnson', role: 'Admin' },
+  { email: 'analyst.one@alloy.com', name: 'Samantha Carter', role: 'Member' },
+  { email: 'data.lead@alloy.com', name: 'Daniel Jackson', role: 'Member' },
+];
+
+export default function TeamPage() {
+  const { user } = useAuth();
+
+  const handleInvite = (e: React.FormEvent) => {
+    e.preventDefault();
+    const formData = new FormData(e.target as HTMLFormElement);
+    const email = formData.get('email');
+    toast.success(`Invitation sent to ${email}!`);
+  };
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between">
+        <div>
+          <CardTitle>Team Members</CardTitle>
+          <CardDescription>
+            Manage and invite members to your organization.
+          </CardDescription>
+        </div>
+        <Dialog>
+            <DialogTrigger asChild>
+                <Button>
+                    <PlusCircle className="mr-2 h-4 w-4" />
+                    Invite Member
+                </Button>
+            </DialogTrigger>
+            <DialogContent className="sm:max-w-[425px]">
+                <form onSubmit={handleInvite}>
+                    <DialogHeader>
+                        <DialogTitle>Invite a new member</DialogTitle>
+                        <DialogDescription>
+                            Enter the email and role for your new team member. They will receive an email to join your organization.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="grid gap-4 py-4">
+                        <div className="space-y-2">
+                            <Label htmlFor="email">Email address</Label>
+                            <Input id="email" name="email" type="email" placeholder="name@example.com" required />
+                        </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="role">Role</Label>
+                             <Select name="role" defaultValue="Member">
+                                <SelectTrigger>
+                                    <SelectValue placeholder="Select a role" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectItem value="Admin">Admin</SelectItem>
+                                    <SelectItem value="Member">Member</SelectItem>
+                                </SelectContent>
+                            </Select>
+                        </div>
+                    </div>
+                    <DialogFooter>
+                        <DialogClose asChild><Button type="button" variant="ghost">Cancel</Button></DialogClose>
+                        <DialogClose asChild><Button type="submit">Send Invitation</Button></DialogClose>
+                    </DialogFooter>
+                </form>
+            </DialogContent>
+        </Dialog>
+      </CardHeader>
+      <CardContent>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Member</TableHead>
+              <TableHead>Role</TableHead>
+              <TableHead className="text-right">Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {teamMembers.map((member) => (
+              <TableRow key={member.email}>
+                <TableCell>
+                  <div className="flex items-center gap-3">
+                    <UserAvatar user={{ email: member.email, full_name: member.name }} />
+                    <div>
+                      <p className="font-medium">{member.name} {member.email === user?.email && "(You)"}</p>
+                      <p className="text-sm text-muted-foreground">
+                        {member.email}
+                      </p>
+                    </div>
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <Badge variant={member.role === 'Admin' ? 'default' : 'secondary'}>
+                    {member.role}
+                  </Badge>
+                </TableCell>
+                <TableCell className="text-right">
+                   <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="icon" disabled={member.email === user?.email}>
+                        <MoreHorizontal className="h-4 w-4" />
+                        <span className="sr-only">Actions</span>
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuLabel>Actions</DropdownMenuLabel>
+                      <DropdownMenuItem>Change role</DropdownMenuItem>
+                      <DropdownMenuItem className="text-destructive focus:bg-destructive/10 focus:text-destructive">
+                        Remove from team
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </CardContent>
+    </Card>
+  );
+}-e 
+-e
+
 File: web/src/app/(pages)/(authed)/dashboard/page.tsx
 "use client";
 
@@ -2144,9 +2338,11 @@ import useSWR from 'swr';
 import { useAuth } from '@/components/global/providers';
 import { ReportView, ReportViewSkeleton } from '@/components/report/ReportView';
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
-import { AlertCircle, Download } from 'lucide-react';
+import { AlertCircle, Download, Loader2 } from 'lucide-react';
 import { useParams } from 'next/navigation';
 import { Button } from '@/components/ui/button';
+import { useState } from 'react';
+import { toast } from 'sonner';
 
 const fetcher = (url: string, token: string) => 
   fetch(url, { headers: { 'Authorization': `Bearer ${token}` } }).then(res => {
@@ -2167,8 +2363,34 @@ export default function ReportPage() {
         accessToken ? [`${API_URL}/reports/${id}`, accessToken] : null,
         ([url, token]) => fetcher(url, token)
     );
+    const [isDownloading, setIsDownloading] = useState(false);
 
-    const downloadUrl = report && accessToken ? `${API_URL}/reports/${report.id}/download-pdf?token=${accessToken}` : '';
+    const handleDownload = async () => {
+        if (!report || !accessToken) return;
+        setIsDownloading(true);
+        try {
+            const res = await fetch(`${API_URL}/reports/${report.id}/download-pdf`, {
+                headers: { 'Authorization': `Bearer ${accessToken}` }
+            });
+            if (!res.ok) {
+                const errorData = await res.json();
+                throw new Error(errorData.detail || "Failed to download PDF.");
+            }
+            const blob = await res.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `Alloy_Report_${report.acquirer_brand}_vs_${report.target_brand}.pdf`;
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            a.remove();
+        } catch (err: any) {
+            toast.error("Download Failed", { description: err.message });
+        } finally {
+            setIsDownloading(false);
+        }
+    };
 
     if (isLoading) {
         return <ReportViewSkeleton />;
@@ -2192,11 +2414,9 @@ export default function ReportPage() {
 
     return (
         <ReportView report={report}>
-            <Button asChild>
-                <a href={downloadUrl} download>
-                    <Download className="mr-2 h-4 w-4" />
-                    Download PDF
-                </a>
+            <Button onClick={handleDownload} disabled={isDownloading}>
+                {isDownloading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
+                {isDownloading ? 'Preparing...' : 'Download PDF'}
             </Button>
         </ReportView>
     );
@@ -2849,7 +3069,7 @@ function page() {
     const footerRightLinks = [
       { href: "/login", label: "Log In" },
       { href: "/login", label: "Request a Demo" },
-      { href: "https://devpost.com/software/alloy-cultural-due-diligence", label: "Devpost Hackathon Submission" },
+      { href: "https://qloo-hackathon.devpost.com", label: "Devpost Hackathon Submission" },
     ];
     const problemStatement = "M&A failures are costly, often rooted in unforeseen cultural clashes. Billions are lost when executive 'gut feel' misses the mark on brand incompatibility.";
     const solutionStatement = "Alloy replaces guesswork with data. We provide a quantifiable Cultural Compatibility Score by analyzing audience taste profiles, de-risking acquisitions and illuminating the human element of a deal.";
@@ -8538,7 +8758,7 @@ import {
 } from "../ui/table";
 import { AlertTriangle, TrendingUp, Zap, Link as LinkIcon, Globe, Users, Target, Trophy, Scale } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Report, ClashSeverity } from "@/types/report";
+import { Report, ClashSeverity, ReportAnalysis } from "@/types/report";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { AIAnalystChat } from "./AIAnalystChat";
 import Image from "next/image";
@@ -8548,17 +8768,39 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { ChartContainer } from "../ui/chart";
 import { ScrollArea } from "../ui/scroll-area";
 import { cn } from "@/lib/utils";
-import React from "react";
+import React, { useMemo } from "react";
 
 interface ReportViewProps {
   report: Report;
-  children?: React.ReactNode; // Accept children
+  children?: React.ReactNode; 
 }
 
-// --- Helper Components ---
+// --- Helper Functions and Components ---
+const useParsedReport = (report: Report) => {
+    return useMemo(() => {
+        const parsedReport = { ...report };
+        if (report.analysis && typeof report.analysis.brand_archetype_summary === 'string') {
+            try {
+                // Create a mutable copy of the analysis object
+                const mutableAnalysis = { ...report.analysis };
+                mutableAnalysis.brand_archetype_summary = JSON.parse(report.analysis.brand_archetype_summary);
+                parsedReport.analysis = mutableAnalysis;
+            } catch (e) {
+                console.error("Failed to parse brand_archetype_summary:", e);
+                // In case of error, keep the original (string) or a default object
+                const mutableAnalysis = { ...report.analysis };
+                // @ts-ignore
+                mutableAnalysis.brand_archetype_summary = { acquirer_archetype: 'N/A', target_archetype: 'N/A' };
+                parsedReport.analysis = mutableAnalysis;
+            }
+        }
+        return parsedReport;
+    }, [report]);
+};
 
 const CompanyLogo = ({ brandName }: { brandName: string }) => {
     const API_URL = process.env.NEXT_PUBLIC_API_URL;
+    // CORE FIX: Use the 'brandName' parameter for the main company logos
     const faviconUrl = `${API_URL}/utils/favicon?brandName=${encodeURIComponent(brandName)}`;
     return (
         <div className="flex items-center gap-3">
@@ -8579,12 +8821,14 @@ const SeverityBadge = ({ severity }: { severity: ClashSeverity }) => {
 };
 
 const SourcePill = ({ url }: { url: string }) => {
+    const API_URL = process.env.NEXT_PUBLIC_API_URL;
     try {
         const domain = new URL(url).hostname?.replace('www.', '');
-        const faviconUrl = `https://satori-rho.vercel.app/api/image?url=${url}`;
+        // This is correct: source pills should use the specific URL
+        const faviconUrl = `${API_URL}/utils/favicon?url=${encodeURIComponent(url)}`;
         return (
             <Link href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-full border bg-secondary/50 px-3 py-1 text-sm text-secondary-foreground transition-colors hover:bg-secondary">
-                <Image src={faviconUrl} alt={`${domain} favicon`} width={16} height={16} className="rounded-full" />
+                <Image src={faviconUrl} alt={`${domain} favicon`} width={16} height={16} className="rounded-full" unoptimized/>
                 {domain}
             </Link>
         )
@@ -8592,6 +8836,7 @@ const SourcePill = ({ url }: { url: string }) => {
         return <Link href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-full border bg-secondary/50 px-3 py-1 text-sm text-secondary-foreground transition-colors hover:bg-secondary"><LinkIcon className="h-4 w-4" />{url}</Link>
     }
 }
+
 
 // --- Main View Sections ---
 
@@ -8608,9 +8853,7 @@ const ReportHeader = ({ report, children }: { report: Report, children?: React.R
                     <CardTitle className="text-3xl">{report.title}</CardTitle>
                     <CardDescription>Cultural due diligence report generated on {new Date(report.created_at).toLocaleString()}.</CardDescription>
                 </div>
-                <div className="flex-shrink-0">
-                    {children}
-                </div>
+                <div className="flex-shrink-0">{children}</div>
             </CardHeader>
         </Card>
     </div>
@@ -8620,7 +8863,7 @@ const ScoreAndArchetypes = ({ report }: { report: Report }) => {
     const analysis = report.analysis;
     if (!analysis) return null;
 
-    const archetypes = analysis.brand_archetype_summary ? JSON.parse(analysis.brand_archetype_summary) : {};
+    const archetypes = (typeof analysis.brand_archetype_summary === 'object' ? analysis.brand_archetype_summary : { acquirer_archetype: 'N/A', target_archetype: 'N/A' }) as { acquirer_archetype?: string, target_archetype?: string };
     const chartData = [{ name: 'Score', value: analysis.cultural_compatibility_score, fill: 'hsl(var(--primary))' }];
     
     return (
@@ -8756,7 +8999,9 @@ const AffinityAnalysis = ({ report }: { report: Report }) => {
 };
 
 export const ReportView = ({ report, children }: ReportViewProps) => {
-    if (report.status === "FAILED") {
+    const parsedReport = useParsedReport(report);
+
+    if (parsedReport.status === "FAILED") {
         return <div className="flex h-full items-center justify-center p-8 text-center">
             <div>
                 <AlertTriangle className="mx-auto h-12 w-12 text-destructive" />
@@ -8771,8 +9016,8 @@ export const ReportView = ({ report, children }: ReportViewProps) => {
             <ResizablePanel defaultSize={65} minSize={50}>
                 <ScrollArea className="h-full p-4 md:p-6">
                     <div className="space-y-6">
-                        <ReportHeader report={report}>{children}</ReportHeader>
-                        <ScoreAndArchetypes report={report} />
+                        <ReportHeader report={parsedReport} children={children} />
+                        <ScoreAndArchetypes report={parsedReport} />
 
                         <Tabs defaultValue="affinity">
                             <TabsList>
@@ -8782,13 +9027,13 @@ export const ReportView = ({ report, children }: ReportViewProps) => {
                                 <TabsTrigger value="sources">Sources</TabsTrigger>
                             </TabsList>
                             <TabsContent value="affinity" className="mt-4">
-                                <AffinityAnalysis report={report} />
+                                <AffinityAnalysis report={parsedReport} />
                             </TabsContent>
                             <TabsContent value="clashes" className="mt-4">
                                 <Card>
                                     <CardHeader><CardTitle className="flex items-center gap-2"><AlertTriangle className="h-5 w-5 text-red-500" />Potential Culture Clashes</CardTitle><CardDescription>Divergent audience tastes that could pose integration risks.</CardDescription></CardHeader>
                                     <CardContent>
-                                        <Table><TableHeader><TableRow><TableHead>Clash Topic</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Severity</TableHead></TableRow></TableHeader><TableBody>{report.culture_clashes.map((c) => (<TableRow key={c.id}><TableCell className="font-semibold">{c.topic}</TableCell><TableCell className="text-muted-foreground whitespace-normal">{c.description}</TableCell><TableCell className="text-right"><SeverityBadge severity={c.severity} /></TableCell></TableRow>))}</TableBody></Table>
+                                        <Table><TableHeader><TableRow><TableHead>Clash Topic</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Severity</TableHead></TableRow></TableHeader><TableBody>{parsedReport.culture_clashes.map((c) => (<TableRow key={c.id}><TableCell className="font-semibold">{c.topic}</TableCell><TableCell className="text-muted-foreground whitespace-normal">{c.description}</TableCell><TableCell className="text-right"><SeverityBadge severity={c.severity} /></TableCell></TableRow>))}</TableBody></Table>
                                     </CardContent>
                                 </Card>
                             </TabsContent>
@@ -8799,7 +9044,7 @@ export const ReportView = ({ report, children }: ReportViewProps) => {
                                         <Table>
                                             <TableHeader><TableRow><TableHead>Opportunity</TableHead><TableHead className="text-right">Impact</TableHead></TableRow></TableHeader>
                                             <TableBody>
-                                                {report.untapped_growths.length > 0 ? report.untapped_growths.map((g) => (
+                                                {parsedReport.untapped_growths.length > 0 ? parsedReport.untapped_growths.map((g) => (
                                                     <TableRow key={g.id}><TableCell className="font-medium whitespace-normal">{g.description}</TableCell><TableCell className="text-right font-bold text-green-600 dark:text-green-400">{g.potential_impact_score}/10</TableCell></TableRow>
                                                 )) : <TableRow><TableCell colSpan={2} className="text-center text-muted-foreground">No significant growth opportunities found.</TableCell></TableRow>}
                                             </TableBody>
@@ -8808,18 +9053,18 @@ export const ReportView = ({ report, children }: ReportViewProps) => {
                                 </Card>
                             </TabsContent>
                              <TabsContent value="sources" className="mt-4">
-                                 {(report.analysis?.search_sources?.length || 0) > 0 || (report.analysis?.acquirer_sources?.length || 0) > 0 || (report.analysis?.target_sources?.length || 0) > 0 ? (
+                                 {(parsedReport.analysis?.search_sources?.length || 0) > 0 || (parsedReport.analysis?.acquirer_sources?.length || 0) > 0 || (parsedReport.analysis?.target_sources?.length || 0) > 0 ? (
                                      <Card>
                                          <CardHeader><CardTitle className="flex items-center gap-2"><Globe className="h-5 w-5 text-blue-500" />Grounding Sources</CardTitle><CardDescription>Web sources used for analysis.</CardDescription></CardHeader>
-                                        {report.analysis?.acquirer_sources && report.analysis.acquirer_sources.length > 0 && <CardContent className="border-t pt-4"><h4 className="text-sm font-semibold mb-2">{report.acquirer_brand} Research</h4><div className="flex flex-wrap gap-2">{report.analysis.acquirer_sources.map(source => <SourcePill key={source.url} url={source.url} />)}</div></CardContent>}
-                                        {report.analysis?.target_sources && report.analysis.target_sources.length > 0 && <CardContent className="border-t pt-4"><h4 className="text-sm font-semibold mb-2">{report.target_brand} Research</h4><div className="flex flex-wrap gap-2">{report.analysis.target_sources.map(source => <SourcePill key={source.url} url={source.url} />)}</div></CardContent>}
-                                        {report.analysis?.search_sources && report.analysis.search_sources.length > 0 && <CardContent className="border-t pt-4"><h4 className="text-sm font-semibold mb-2">General Research</h4><div className="flex flex-wrap gap-2">{report.analysis.search_sources.map(source => <SourcePill key={source.url} url={source.url} />)}</div></CardContent>}
+                                        {parsedReport.analysis?.acquirer_sources && parsedReport.analysis.acquirer_sources.length > 0 && <CardContent className="border-t pt-4"><h4 className="text-sm font-semibold mb-2">{parsedReport.acquirer_brand} Research</h4><div className="flex flex-wrap gap-2">{parsedReport.analysis.acquirer_sources.map(source => <SourcePill key={source.url} url={source.url} />)}</div></CardContent>}
+                                        {parsedReport.analysis?.target_sources && parsedReport.analysis.target_sources.length > 0 && <CardContent className="border-t pt-4"><h4 className="text-sm font-semibold mb-2">{parsedReport.target_brand} Research</h4><div className="flex flex-wrap gap-2">{parsedReport.analysis.target_sources.map(source => <SourcePill key={source.url} url={source.url} />)}</div></CardContent>}
+                                        {parsedReport.analysis?.search_sources && parsedReport.analysis.search_sources.length > 0 && <CardContent className="border-t pt-4"><h4 className="text-sm font-semibold mb-2">General Research</h4><div className="flex flex-wrap gap-2">{parsedReport.analysis.search_sources.map(source => <SourcePill key={source.url} url={source.url} />)}</div></CardContent>}
                                      </Card>
                                   ) : <p className="text-muted-foreground text-center py-8">No external sources were used for this analysis.</p>}
                              </TabsContent>
                         </Tabs>
                         <div className="text-center text-xs text-muted-foreground pt-8">
-                            <p>Report ID: {report.id}</p>
+                            <p>Report ID: {parsedReport.id}</p>
                             <p>Cultural taste data powered by <Link href="https://qloo.com" target="_blank" className="underline hover:text-foreground">Qloo, the AI for Culture and Taste</Link>.</p>
                         </div>
                     </div>
@@ -8827,7 +9072,7 @@ export const ReportView = ({ report, children }: ReportViewProps) => {
             </ResizablePanel>
             <ResizableHandle withHandle />
             <ResizablePanel defaultSize={35} minSize={25}>
-                <AIAnalystChat report={report} />
+                <AIAnalystChat report={parsedReport} />
             </ResizablePanel>
         </ResizablePanelGroup>
     );
@@ -8846,230 +9091,6 @@ export const ReportViewSkeleton = () => {
       <Skeleton className="h-10 w-64" />
       <Skeleton className="h-80 w-full" />
     </div>
-  );
-};-e 
--e
-
-File: web/src/components/report/ChatCreator.tsx
-"use client";
-
-import React, { useState, useRef, useEffect, FormEvent } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { toast } from 'sonner';
-import useSWRMutation from 'swr/mutation';
-import { useAuth } from '@/components/global/providers';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card';
-import { Input } from '../ui/input';
-import { Button } from '../ui/button';
-import { Label } from '../ui/label';
-import { Switch } from '../ui/switch';
-import { Textarea } from '../ui/textarea';
-import { ArrowUp, Plus, Bot, User } from 'lucide-react';
-import { ScrollArea } from '../ui/scroll-area';
-import { cn } from '@/lib/utils';
-
-interface Message {
-  id: number;
-  text: string;
-  sender: 'bot' | 'user';
-  component?: React.ReactNode;
-}
-
-interface ChatCreatorProps {
-    onReportCreated: () => void;
-}
-
-const createReport = async (url: string, { arg }: { arg: any }) => {
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${arg.token}` },
-    body: JSON.stringify(arg.data)
-  });
-  if (!response.ok) {
-    const errorData = await response.json();
-    throw new Error(errorData.detail || 'Failed to create report.');
-  }
-  return response.json();
-}
-
-export const ChatCreator = ({ onReportCreated }: ChatCreatorProps) => {
-  const { accessToken } = useAuth();
-  const API_URL = process.env.NEXT_PUBLIC_API_URL;
-  const { trigger: triggerCreate, isMutating: isCreating } = useSWRMutation(`${API_URL}/reports/`, createReport);
-
-  const [messages, setMessages] = useState<Message[]>([
-    { id: 1, text: "Welcome to Alloy. Let's de-risk your next acquisition. Who is the **acquiring** company?", sender: 'bot' }
-  ]);
-  const [inputValue, setInputValue] = useState('');
-  const [stage, setStage] = useState<'acquirer' | 'target' | 'context' | 'ready'>('acquirer');
-  const [acquirer, setAcquirer] = useState('');
-  const [target, setTarget] = useState('');
-  const [context, setContext] = useState('');
-  const [useGrounding, setUseGrounding] = useState(false);
-  const [showContext, setShowContext] = useState(false);
-
-  const scrollAreaRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (scrollAreaRef.current) {
-      scrollAreaRef.current.scrollTo({ top: scrollAreaRef.current.scrollHeight, behavior: 'smooth' });
-    }
-  }, [messages]);
-
-  const addMessage = (text: string, sender: 'bot' | 'user', component?: React.ReactNode) => {
-    const newMessage: Message = { id: Date.now(), text, sender, component };
-    setMessages(prev => [...prev, newMessage]);
-  };
-
-  const handleSendMessage = (e: FormEvent) => {
-    e.preventDefault();
-    if (!inputValue.trim() || isCreating) return;
-
-    addMessage(inputValue, 'user');
-
-    switch (stage) {
-      case 'acquirer':
-        setAcquirer(inputValue);
-        setStage('target');
-        addMessage(`Great. And who is the **target** company?`, 'bot');
-        break;
-      case 'target':
-        setTarget(inputValue);
-        setStage('ready');
-        addMessage(`Perfect. We're ready to analyze the cultural compatibility between **${acquirer}** (Acquirer) and **${inputValue}** (Target).`, 'bot', 
-          <div className="mt-4 p-4 border rounded-lg bg-background/50 space-y-4">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="grounding-switch" className="flex flex-col space-y-1">
-                  <span>Enable Internet Grounding</span>
-                  <span className="font-normal leading-snug text-muted-foreground text-xs">
-                    Allow AI to use its knowledge to enrich analysis.
-                  </span>
-                </Label>
-                <Switch id="grounding-switch" checked={useGrounding} onCheckedChange={setUseGrounding} />
-              </div>
-               <Button variant="ghost" size="sm" className="w-full justify-start" onClick={() => setShowContext(true)}>
-                    <Plus className="mr-2 h-4 w-4" /> Add Supplementary Context
-                </Button>
-              {showContext && (
-                <Textarea 
-                    placeholder="Paste any relevant articles, memos, or data here..." 
-                    value={context}
-                    onChange={e => setContext(e.target.value)}
-                    className="min-h-[100px]"
-                />
-              )}
-          </div>
-        );
-        break;
-    }
-    setInputValue('');
-  };
-
-  const handleGenerateReport = async () => {
-    if (!acquirer || !target || isCreating) return;
-
-    let toastId = toast.loading("Kicking off analysis...", { description: "This may take a minute." });
-    setTimeout(() => toast.loading("Analyzing taste profiles...", { id: toastId }), 2000);
-    setTimeout(() => toast.loading("Synthesizing strategic insights...", { id: toastId }), 5000);
-
-    try {
-      await triggerCreate({
-        token: accessToken!,
-        data: {
-          acquirer_brand: acquirer,
-          target_brand: target,
-          title: `${acquirer} vs. ${target}`,
-          context: context || null,
-          use_grounding: useGrounding
-        }
-      });
-      toast.success("Report generated successfully!", { id: toastId });
-      onReportCreated();
-      // Reset state for next report
-      setMessages([{ id: 1, text: "Welcome back. Let's analyze another deal. Who is the acquiring company?", sender: 'bot' }]);
-      setStage('acquirer');
-      setAcquirer('');
-      setTarget('');
-      setContext('');
-      setUseGrounding(false);
-      setShowContext(false);
-    } catch (err: any) {
-      toast.error("Report Generation Failed", { id: toastId, description: err.message });
-    }
-  };
-
-  return (
-    <Card className="lg:col-span-1 flex flex-col h-[500px] md:h-auto">
-      <CardHeader>
-        <CardTitle>Create New Alloy Report</CardTitle>
-        <CardDescription>Use the chat to start your cultural analysis.</CardDescription>
-      </CardHeader>
-      <CardContent className="flex-grow flex flex-col gap-4 overflow-hidden">
-        <ScrollArea className="flex-grow pr-4 -mr-4" ref={scrollAreaRef}>
-            <div className="space-y-6">
-            <AnimatePresence>
-              {messages.map((message) => (
-                <motion.div
-                  key={message.id}
-                  layout
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.3 }}
-                  className={cn(
-                    "flex items-start gap-3",
-                    message.sender === 'user' ? 'justify-end' : 'justify-start'
-                  )}
-                >
-                  {message.sender === 'bot' && (
-                    <div className="bg-muted rounded-full p-2">
-                      <Bot className="h-4 w-4" />
-                    </div>
-                  )}
-                  <div className={cn(
-                    "max-w-xs md:max-w-sm rounded-lg px-4 py-2 text-sm",
-                    message.sender === 'bot' 
-                      ? 'bg-muted rounded-bl-none' 
-                      : 'bg-primary text-primary-foreground rounded-br-none'
-                  )}>
-                    <p dangerouslySetInnerHTML={{ __html: message.text }}></p>
-                    {message.component}
-                  </div>
-                   {message.sender === 'user' && (
-                    <div className="bg-primary/20 rounded-full p-2">
-                      <User className="h-4 w-4" />
-                    </div>
-                  )}
-                </motion.div>
-              ))}
-            </AnimatePresence>
-            </div>
-        </ScrollArea>
-        
-        {stage === 'ready' ? (
-            <Button onClick={handleGenerateReport} disabled={isCreating} className="w-full">
-              {isCreating ? 'Analyzing...' : 'Generate Report'}
-            </Button>
-        ) : (
-            <form onSubmit={handleSendMessage} className="flex items-center gap-2">
-                <Input
-                    id="chat-input"
-                    placeholder={
-                        stage === 'acquirer' ? "e.g., Disney" :
-                        stage === 'target' ? "e.g., A24 Films" :
-                        "Enter your message..."
-                    }
-                    value={inputValue}
-                    onChange={(e) => setInputValue(e.target.value)}
-                    autoComplete="off"
-                    disabled={isCreating}
-                />
-                <Button type="submit" size="icon" disabled={!inputValue.trim() || isCreating}>
-                    <ArrowUp className="h-4 w-4" />
-                </Button>
-            </form>
-        )}
-      </CardContent>
-    </Card>
   );
 };-e 
 -e
@@ -9620,7 +9641,7 @@ interface DashboardGreetingProps {
 
 const greetings = [
     { title: "Let's de-risk your next deal.", subtitle: "Enter the acquirer and target to begin your cultural analysis." },
-    { title: "Ready for analysis?", subtitle: "Quantify the cultural fit for your next M&A." },
+   // { title: "Ready for analysis?", subtitle: "Quantify the cultural fit for your next M&A." },
 ];
 
 // A simple hash function to pick a greeting based on the day
@@ -9831,7 +9852,8 @@ const TooltipContent = React.forwardRef<React.ElementRef<typeof TooltipPrimitive
 TooltipContent.displayName = TooltipPrimitive.Content.displayName;
 
 const SourceItem = ({ source }: { source: { url: string, title?: string }}) => {
-    const faviconUrl = `https://satori-rho.vercel.app/api/image?url=${source.url}`;
+    const domain = new URL(source.url).hostname?.replace('www.', '');
+    const faviconUrl = `${process.env.NEXT_PUBLIC_API_URL}/utils/favicon?url=${encodeURIComponent(source.url)}`;
     return (
         <Link href={source.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 group">
             <Image src={faviconUrl} alt="source favicon" width={16} height={16} className="rounded-full" unoptimized/>
@@ -9839,6 +9861,11 @@ const SourceItem = ({ source }: { source: { url: string, title?: string }}) => {
         </Link>
     );
 };
+
+const FaviconPreview = ({ url }: { url: string }) => {
+    const faviconUrl = `${process.env.NEXT_PUBLIC_API_URL}/utils/favicon?url=${encodeURIComponent(url)}`;
+    return <Image src={faviconUrl} alt="favicon" width={16} height={16} className="rounded-full" unoptimized/>;
+}
 
 const StepItem = ({ step }: { step: Step }) => {
     const ICONS = {
@@ -9854,7 +9881,6 @@ const StepItem = ({ step }: { step: Step }) => {
     };
 
     const renderContent = () => {
-        // CORE FIX: When the step is a source, render the SourceItem component
         if (step.status === 'source' && step.payload) {
             return <SourceItem source={step.payload} />;
         }
@@ -9990,7 +10016,12 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
                         <AnimatePresence>{logSteps.map((step) => <StepItem key={step.id} step={step} />)}</AnimatePresence>
                         {sources.length > 0 && <Collapsible open={isCollapsibleOpen} onOpenChange={setIsCollapsibleOpen}>
                             <CollapsibleTrigger className="w-full p-2 rounded-md hover:bg-muted/50 text-left">
-                                <div className="flex items-center justify-between"><div className="flex items-center gap-2 overflow-hidden"><Search className="h-4 w-4 text-blue-500 flex-shrink-0"/><span className="text-sm font-medium">Found {sources.length} sources</span><div className="flex items-center gap-1.5 flex-shrink min-w-0">{sources.map(source => <motion.div key={source.id} layout><Image src={`https://satori-rho.vercel.app/api/image?url=${source.payload.url}`} alt="favicon" width={16} height={16} className="rounded-full" unoptimized/></motion.div>)}</div></div><span className="text-xs text-muted-foreground">{isCollapsibleOpen ? 'Collapse' : 'Expand'}</span></div>
+                                <div className="flex items-center justify-between"><div className="flex items-center gap-2 overflow-hidden"><Search className="h-4 w-4 text-blue-500 flex-shrink-0"/><span className="text-sm font-medium">Found {sources.length} sources</span>
+                                <div className="flex items-center gap-1.5 flex-shrink min-w-0">
+                                    {/* CORE FIX: Remove framer-motion from the list mapping */}
+                                    {sources.map(source => <FaviconPreview key={source.id} url={source.payload.url}/>)}
+                                </div>
+                                </div><span className="text-xs text-muted-foreground">{isCollapsibleOpen ? 'Collapse' : 'Expand'}</span></div>
                             </CollapsibleTrigger>
                             <CollapsibleContent className="space-y-3 pt-2">{sources.map(source => <StepItem key={source.id} step={source} />)}</CollapsibleContent>
                         </Collapsible>}
@@ -10484,7 +10515,6 @@ const mainNavItems = [
   { href: "/dashboard", icon: Home, label: "Dashboard" },
   { href: "/dashboard/reports", icon: FileText, label: "My Reports" },
   { href: "/dashboard/team", icon: Users, label: "Team Members" },
-  { href: "/dashboard/billing", icon: CreditCard, label: "Billing" },
 ];
 
 const settingsNavItems = [
@@ -10837,7 +10867,9 @@ web/src
 │   │       │   │   ├── [id]
 │   │       │   │   │   └── page.tsx
 │   │       │   │   └── page.tsx
-│   │       │   └── settings
+│   │       │   ├── settings
+│   │       │   │   └── page.tsx
+│   │       │   └── team
 │   │       │       └── page.tsx
 │   │       └── layout.tsx
 │   ├── favicon.ico
@@ -10862,7 +10894,6 @@ web/src
 │   │   └── UserAvatar.tsx
 │   ├── report
 │   │   ├── AIAnalystChat.tsx
-│   │   ├── ChatCreator.tsx
 │   │   └── ReportView.tsx
 │   └── ui
 │       ├── accordion.tsx
@@ -10918,7 +10949,7 @@ web/src
 └── types
     └── report.ts
 
-20 directories, 78 files
+21 directories, 78 files
 
 -----------------------
 

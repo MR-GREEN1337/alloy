@@ -21,7 +21,8 @@ const eslintConfig = [
       "prefer-const": "off",
       "@typescript-eslint/no-unused-expressions": "off",
       "react/display-name": "off",
-      "@typescript-eslint/ban-ts-comment": "off"
+      "@typescript-eslint/ban-ts-comment": "off",
+      "react/no-children-prop": "off"
     }
   }
 ];

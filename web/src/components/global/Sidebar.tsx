@@ -35,7 +35,6 @@ const mainNavItems = [
   { href: "/dashboard", icon: Home, label: "Dashboard" },
   { href: "/dashboard/reports", icon: FileText, label: "My Reports" },
   { href: "/dashboard/team", icon: Users, label: "Team Members" },
-  { href: "/dashboard/billing", icon: CreditCard, label: "Billing" },
 ];
 
 const settingsNavItems = [

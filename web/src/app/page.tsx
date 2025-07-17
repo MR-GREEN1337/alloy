@@ -15,7 +15,7 @@ function page() {
     const footerRightLinks = [
       { href: "/login", label: "Log In" },
       { href: "/login", label: "Request a Demo" },
-      { href: "https://devpost.com/software/alloy-cultural-due-diligence", label: "Devpost Hackathon Submission" },
+      { href: "https://qloo-hackathon.devpost.com", label: "Devpost Hackathon Submission" },
     ];
     const problemStatement = "M&A failures are costly, often rooted in unforeseen cultural clashes. Billions are lost when executive 'gut feel' misses the mark on brand incompatibility.";
     const solutionStatement = "Alloy replaces guesswork with data. We provide a quantifiable Cultural Compatibility Score by analyzing audience taste profiles, de-risking acquisitions and illuminating the human element of a deal.";

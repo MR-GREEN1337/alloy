@@ -57,7 +57,8 @@ const TooltipContent = React.forwardRef<React.ElementRef<typeof TooltipPrimitive
 TooltipContent.displayName = TooltipPrimitive.Content.displayName;
 
 const SourceItem = ({ source }: { source: { url: string, title?: string }}) => {
-    const faviconUrl = `https://satori-rho.vercel.app/api/image?url=${source.url}`;
+    const domain = new URL(source.url).hostname?.replace('www.', '');
+    const faviconUrl = `${process.env.NEXT_PUBLIC_API_URL}/utils/favicon?url=${encodeURIComponent(source.url)}`;
     return (
         <Link href={source.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 group">
             <Image src={faviconUrl} alt="source favicon" width={16} height={16} className="rounded-full" unoptimized/>
@@ -65,6 +66,11 @@ const SourceItem = ({ source }: { source: { url: string, title?: string }}) => {
         </Link>
     );
 };
+
+const FaviconPreview = ({ url }: { url: string }) => {
+    const faviconUrl = `${process.env.NEXT_PUBLIC_API_URL}/utils/favicon?url=${encodeURIComponent(url)}`;
+    return <Image src={faviconUrl} alt="favicon" width={16} height={16} className="rounded-full" unoptimized/>;
+}
 
 const StepItem = ({ step }: { step: Step }) => {
     const ICONS = {
@@ -80,7 +86,6 @@ const StepItem = ({ step }: { step: Step }) => {
     };
 
     const renderContent = () => {
-        // CORE FIX: When the step is a source, render the SourceItem component
         if (step.status === 'source' && step.payload) {
             return <SourceItem source={step.payload} />;
         }
@@ -216,7 +221,12 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
                         <AnimatePresence>{logSteps.map((step) => <StepItem key={step.id} step={step} />)}</AnimatePresence>
                         {sources.length > 0 && <Collapsible open={isCollapsibleOpen} onOpenChange={setIsCollapsibleOpen}>
                             <CollapsibleTrigger className="w-full p-2 rounded-md hover:bg-muted/50 text-left">
-                                <div className="flex items-center justify-between"><div className="flex items-center gap-2 overflow-hidden"><Search className="h-4 w-4 text-blue-500 flex-shrink-0"/><span className="text-sm font-medium">Found {sources.length} sources</span><div className="flex items-center gap-1.5 flex-shrink min-w-0">{sources.map(source => <motion.div key={source.id} layout><Image src={`https://satori-rho.vercel.app/api/image?url=${source.payload.url}`} alt="favicon" width={16} height={16} className="rounded-full" unoptimized/></motion.div>)}</div></div><span className="text-xs text-muted-foreground">{isCollapsibleOpen ? 'Collapse' : 'Expand'}</span></div>
+                                <div className="flex items-center justify-between"><div className="flex items-center gap-2 overflow-hidden"><Search className="h-4 w-4 text-blue-500 flex-shrink-0"/><span className="text-sm font-medium">Found {sources.length} sources</span>
+                                <div className="flex items-center gap-1.5 flex-shrink min-w-0">
+                                    {/* CORE FIX: Remove framer-motion from the list mapping */}
+                                    {sources.map(source => <FaviconPreview key={source.id} url={source.payload.url}/>)}
+                                </div>
+                                </div><span className="text-xs text-muted-foreground">{isCollapsibleOpen ? 'Collapse' : 'Expand'}</span></div>
                             </CollapsibleTrigger>
                             <CollapsibleContent className="space-y-3 pt-2">{sources.map(source => <StepItem key={source.id} step={source} />)}</CollapsibleContent>
                         </Collapsible>}

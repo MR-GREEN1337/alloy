@@ -9,7 +9,7 @@ interface DashboardGreetingProps {
 
 const greetings = [
     { title: "Let's de-risk your next deal.", subtitle: "Enter the acquirer and target to begin your cultural analysis." },
-    { title: "Ready for analysis?", subtitle: "Quantify the cultural fit for your next M&A." },
+   // { title: "Ready for analysis?", subtitle: "Quantify the cultural fit for your next M&A." },
 ];
 
 // A simple hash function to pick a greeting based on the day

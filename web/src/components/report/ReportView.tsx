@@ -19,7 +19,7 @@ import {
 } from "../ui/table";
 import { AlertTriangle, TrendingUp, Zap, Link as LinkIcon, Globe, Users, Target, Trophy, Scale } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Report, ClashSeverity } from "@/types/report";
+import { Report, ClashSeverity, ReportAnalysis } from "@/types/report";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { AIAnalystChat } from "./AIAnalystChat";
 import Image from "next/image";
@@ -29,17 +29,39 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { ChartContainer } from "../ui/chart";
 import { ScrollArea } from "../ui/scroll-area";
 import { cn } from "@/lib/utils";
-import React from "react";
+import React, { useMemo } from "react";
 
 interface ReportViewProps {
   report: Report;
-  children?: React.ReactNode; // Accept children
+  children?: React.ReactNode; 
 }
 
-// --- Helper Components ---
+// --- Helper Functions and Components ---
+const useParsedReport = (report: Report) => {
+    return useMemo(() => {
+        const parsedReport = { ...report };
+        if (report.analysis && typeof report.analysis.brand_archetype_summary === 'string') {
+            try {
+                // Create a mutable copy of the analysis object
+                const mutableAnalysis = { ...report.analysis };
+                mutableAnalysis.brand_archetype_summary = JSON.parse(report.analysis.brand_archetype_summary);
+                parsedReport.analysis = mutableAnalysis;
+            } catch (e) {
+                console.error("Failed to parse brand_archetype_summary:", e);
+                // In case of error, keep the original (string) or a default object
+                const mutableAnalysis = { ...report.analysis };
+                // @ts-ignore
+                mutableAnalysis.brand_archetype_summary = { acquirer_archetype: 'N/A', target_archetype: 'N/A' };
+                parsedReport.analysis = mutableAnalysis;
+            }
+        }
+        return parsedReport;
+    }, [report]);
+};
 
 const CompanyLogo = ({ brandName }: { brandName: string }) => {
     const API_URL = process.env.NEXT_PUBLIC_API_URL;
+    // CORE FIX: Use the 'brandName' parameter for the main company logos
     const faviconUrl = `${API_URL}/utils/favicon?brandName=${encodeURIComponent(brandName)}`;
     return (
         <div className="flex items-center gap-3">
@@ -60,12 +82,14 @@ const SeverityBadge = ({ severity }: { severity: ClashSeverity }) => {
 };
 
 const SourcePill = ({ url }: { url: string }) => {
+    const API_URL = process.env.NEXT_PUBLIC_API_URL;
     try {
         const domain = new URL(url).hostname?.replace('www.', '');
-        const faviconUrl = `https://satori-rho.vercel.app/api/image?url=${url}`;
+        // This is correct: source pills should use the specific URL
+        const faviconUrl = `${API_URL}/utils/favicon?url=${encodeURIComponent(url)}`;
         return (
             <Link href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-full border bg-secondary/50 px-3 py-1 text-sm text-secondary-foreground transition-colors hover:bg-secondary">
-                <Image src={faviconUrl} alt={`${domain} favicon`} width={16} height={16} className="rounded-full" />
+                <Image src={faviconUrl} alt={`${domain} favicon`} width={16} height={16} className="rounded-full" unoptimized/>
                 {domain}
             </Link>
         )
@@ -73,6 +97,7 @@ const SourcePill = ({ url }: { url: string }) => {
         return <Link href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-full border bg-secondary/50 px-3 py-1 text-sm text-secondary-foreground transition-colors hover:bg-secondary"><LinkIcon className="h-4 w-4" />{url}</Link>
     }
 }
+
 
 // --- Main View Sections ---
 
@@ -89,9 +114,7 @@ const ReportHeader = ({ report, children }: { report: Report, children?: React.R
                     <CardTitle className="text-3xl">{report.title}</CardTitle>
                     <CardDescription>Cultural due diligence report generated on {new Date(report.created_at).toLocaleString()}.</CardDescription>
                 </div>
-                <div className="flex-shrink-0">
-                    {children}
-                </div>
+                <div className="flex-shrink-0">{children}</div>
             </CardHeader>
         </Card>
     </div>
@@ -101,7 +124,7 @@ const ScoreAndArchetypes = ({ report }: { report: Report }) => {
     const analysis = report.analysis;
     if (!analysis) return null;
 
-    const archetypes = analysis.brand_archetype_summary ? JSON.parse(analysis.brand_archetype_summary) : {};
+    const archetypes = (typeof analysis.brand_archetype_summary === 'object' ? analysis.brand_archetype_summary : { acquirer_archetype: 'N/A', target_archetype: 'N/A' }) as { acquirer_archetype?: string, target_archetype?: string };
     const chartData = [{ name: 'Score', value: analysis.cultural_compatibility_score, fill: 'hsl(var(--primary))' }];
     
     return (
@@ -237,7 +260,9 @@ const AffinityAnalysis = ({ report }: { report: Report }) => {
 };
 
 export const ReportView = ({ report, children }: ReportViewProps) => {
-    if (report.status === "FAILED") {
+    const parsedReport = useParsedReport(report);
+
+    if (parsedReport.status === "FAILED") {
         return <div className="flex h-full items-center justify-center p-8 text-center">
             <div>
                 <AlertTriangle className="mx-auto h-12 w-12 text-destructive" />
@@ -252,8 +277,8 @@ export const ReportView = ({ report, children }: ReportViewProps) => {
             <ResizablePanel defaultSize={65} minSize={50}>
                 <ScrollArea className="h-full p-4 md:p-6">
                     <div className="space-y-6">
-                        <ReportHeader report={report}>{children}</ReportHeader>
-                        <ScoreAndArchetypes report={report} />
+                        <ReportHeader report={parsedReport} children={children} />
+                        <ScoreAndArchetypes report={parsedReport} />
 
                         <Tabs defaultValue="affinity">
                             <TabsList>
@@ -263,13 +288,13 @@ export const ReportView = ({ report, children }: ReportViewProps) => {
                                 <TabsTrigger value="sources">Sources</TabsTrigger>
                             </TabsList>
                             <TabsContent value="affinity" className="mt-4">
-                                <AffinityAnalysis report={report} />
+                                <AffinityAnalysis report={parsedReport} />
                             </TabsContent>
                             <TabsContent value="clashes" className="mt-4">
                                 <Card>
                                     <CardHeader><CardTitle className="flex items-center gap-2"><AlertTriangle className="h-5 w-5 text-red-500" />Potential Culture Clashes</CardTitle><CardDescription>Divergent audience tastes that could pose integration risks.</CardDescription></CardHeader>
                                     <CardContent>
-                                        <Table><TableHeader><TableRow><TableHead>Clash Topic</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Severity</TableHead></TableRow></TableHeader><TableBody>{report.culture_clashes.map((c) => (<TableRow key={c.id}><TableCell className="font-semibold">{c.topic}</TableCell><TableCell className="text-muted-foreground whitespace-normal">{c.description}</TableCell><TableCell className="text-right"><SeverityBadge severity={c.severity} /></TableCell></TableRow>))}</TableBody></Table>
+                                        <Table><TableHeader><TableRow><TableHead>Clash Topic</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Severity</TableHead></TableRow></TableHeader><TableBody>{parsedReport.culture_clashes.map((c) => (<TableRow key={c.id}><TableCell className="font-semibold">{c.topic}</TableCell><TableCell className="text-muted-foreground whitespace-normal">{c.description}</TableCell><TableCell className="text-right"><SeverityBadge severity={c.severity} /></TableCell></TableRow>))}</TableBody></Table>
                                     </CardContent>
                                 </Card>
                             </TabsContent>
@@ -280,7 +305,7 @@ export const ReportView = ({ report, children }: ReportViewProps) => {
                                         <Table>
                                             <TableHeader><TableRow><TableHead>Opportunity</TableHead><TableHead className="text-right">Impact</TableHead></TableRow></TableHeader>
                                             <TableBody>
-                                                {report.untapped_growths.length > 0 ? report.untapped_growths.map((g) => (
+                                                {parsedReport.untapped_growths.length > 0 ? parsedReport.untapped_growths.map((g) => (
                                                     <TableRow key={g.id}><TableCell className="font-medium whitespace-normal">{g.description}</TableCell><TableCell className="text-right font-bold text-green-600 dark:text-green-400">{g.potential_impact_score}/10</TableCell></TableRow>
                                                 )) : <TableRow><TableCell colSpan={2} className="text-center text-muted-foreground">No significant growth opportunities found.</TableCell></TableRow>}
                                             </TableBody>
@@ -289,18 +314,18 @@ export const ReportView = ({ report, children }: ReportViewProps) => {
                                 </Card>
                             </TabsContent>
                              <TabsContent value="sources" className="mt-4">
-                                 {(report.analysis?.search_sources?.length || 0) > 0 || (report.analysis?.acquirer_sources?.length || 0) > 0 || (report.analysis?.target_sources?.length || 0) > 0 ? (
+                                 {(parsedReport.analysis?.search_sources?.length || 0) > 0 || (parsedReport.analysis?.acquirer_sources?.length || 0) > 0 || (parsedReport.analysis?.target_sources?.length || 0) > 0 ? (
                                      <Card>
                                          <CardHeader><CardTitle className="flex items-center gap-2"><Globe className="h-5 w-5 text-blue-500" />Grounding Sources</CardTitle><CardDescription>Web sources used for analysis.</CardDescription></CardHeader>
-                                        {report.analysis?.acquirer_sources && report.analysis.acquirer_sources.length > 0 && <CardContent className="border-t pt-4"><h4 className="text-sm font-semibold mb-2">{report.acquirer_brand} Research</h4><div className="flex flex-wrap gap-2">{report.analysis.acquirer_sources.map(source => <SourcePill key={source.url} url={source.url} />)}</div></CardContent>}
-                                        {report.analysis?.target_sources && report.analysis.target_sources.length > 0 && <CardContent className="border-t pt-4"><h4 className="text-sm font-semibold mb-2">{report.target_brand} Research</h4><div className="flex flex-wrap gap-2">{report.analysis.target_sources.map(source => <SourcePill key={source.url} url={source.url} />)}</div></CardContent>}
-                                        {report.analysis?.search_sources && report.analysis.search_sources.length > 0 && <CardContent className="border-t pt-4"><h4 className="text-sm font-semibold mb-2">General Research</h4><div className="flex flex-wrap gap-2">{report.analysis.search_sources.map(source => <SourcePill key={source.url} url={source.url} />)}</div></CardContent>}
+                                        {parsedReport.analysis?.acquirer_sources && parsedReport.analysis.acquirer_sources.length > 0 && <CardContent className="border-t pt-4"><h4 className="text-sm font-semibold mb-2">{parsedReport.acquirer_brand} Research</h4><div className="flex flex-wrap gap-2">{parsedReport.analysis.acquirer_sources.map(source => <SourcePill key={source.url} url={source.url} />)}</div></CardContent>}
+                                        {parsedReport.analysis?.target_sources && parsedReport.analysis.target_sources.length > 0 && <CardContent className="border-t pt-4"><h4 className="text-sm font-semibold mb-2">{parsedReport.target_brand} Research</h4><div className="flex flex-wrap gap-2">{parsedReport.analysis.target_sources.map(source => <SourcePill key={source.url} url={source.url} />)}</div></CardContent>}
+                                        {parsedReport.analysis?.search_sources && parsedReport.analysis.search_sources.length > 0 && <CardContent className="border-t pt-4"><h4 className="text-sm font-semibold mb-2">General Research</h4><div className="flex flex-wrap gap-2">{parsedReport.analysis.search_sources.map(source => <SourcePill key={source.url} url={source.url} />)}</div></CardContent>}
                                      </Card>
                                   ) : <p className="text-muted-foreground text-center py-8">No external sources were used for this analysis.</p>}
                              </TabsContent>
                         </Tabs>
                         <div className="text-center text-xs text-muted-foreground pt-8">
-                            <p>Report ID: {report.id}</p>
+                            <p>Report ID: {parsedReport.id}</p>
                             <p>Cultural taste data powered by <Link href="https://qloo.com" target="_blank" className="underline hover:text-foreground">Qloo, the AI for Culture and Taste</Link>.</p>
                         </div>
                     </div>
@@ -308,7 +333,7 @@ export const ReportView = ({ report, children }: ReportViewProps) => {
             </ResizablePanel>
             <ResizableHandle withHandle />
             <ResizablePanel defaultSize={35} minSize={25}>
-                <AIAnalystChat report={report} />
+                <AIAnalystChat report={parsedReport} />
             </ResizablePanel>
         </ResizablePanelGroup>
     );

@@ -89,13 +89,11 @@ async def synthesize_final_report(agent_data: dict) -> dict:
     try:
         response = await model.generate_content_async(prompt, generation_config={"response_mime_type": "application/json"})
         report = json.loads(response.text)
-        # Ensure numeric fields have defaults if LLM omits them
         report['cultural_compatibility_score'] = report.get('cultural_compatibility_score', 0.0)
         report['affinity_overlap_score'] = report.get('affinity_overlap_score', 0.0)
         return report
     except Exception as e:
         logger.error(f"Final report synthesis failed: {e}")
-        # CORE FIX: Provide default 0.0 values for non-nullable numeric fields.
         return {
             "strategic_summary": "Analysis failed during final synthesis. Key data may be missing.",
             "cultural_compatibility_score": 0.0,
@@ -162,7 +160,7 @@ async def generate_full_report_stream(report_id: int, payload: ReportGeneratePay
                 if sse_event: yield sse_event
                 if event.get("status") == "complete": break
             
-            if not agent.final_data: agent.final_data = {} # Ensure final_data is not None
+            if not agent.final_data: agent.final_data = {}
 
             yield f"data: {json.dumps({'status': 'synthesis', 'message': 'Synthesizing final report...'})}\n\n"
             final_report = await synthesize_final_report(agent.final_data)
@@ -197,7 +195,6 @@ async def generate_full_report_stream(report_id: int, payload: ReportGeneratePay
             
             yield f"data: {json.dumps({'status': 'complete', 'message': 'Report generated successfully!', 'payload': {'reportId': report_id}})}\n\n"
         except Exception as e:
-            # CORE FIX: Log a generic message and let exc_info handle the complex exception object.
             logger.error(f"Error in report generation stream for report {report_id}", exc_info=True)
             yield f"data: {json.dumps({'status': 'error', 'message': 'An unexpected error occurred during report generation.'})}\n\n"
         finally:
@@ -207,14 +204,39 @@ async def generate_full_report_stream(report_id: int, payload: ReportGeneratePay
 
 @router.get("/{report_id}/download-pdf")
 async def download_report_pdf(report_id: int, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
-    statement = select(models.Report).where(models.Report.id == report_id, models.Report.user_id == current_user.id).options(selectinload(models.Report.analysis), selectinload(models.Report.culture_clashes), selectinload(models.Report.untapped_growths))
+    """Generates and downloads a professional PDF report."""
+    logger.info(f"User {current_user.email} requested PDF for report {report_id}")
+    
+    statement = (
+        select(models.Report)
+        .where(models.Report.id == report_id, models.Report.user_id == current_user.id)
+        .options(
+            selectinload(models.Report.analysis),
+            selectinload(models.Report.culture_clashes),
+            selectinload(models.Report.untapped_growths)
+        )
+    )
     result = await session.execute(statement)
     report = result.scalar_one_or_none()
-    if not report or report.status != models.ReportStatus.COMPLETED: raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found or not complete.")
+    
+    if not report or report.status != models.ReportStatus.COMPLETED or not report.analysis:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found or not complete.")
+
     try:
-        pdf_bytes = create_report_pdf(report)
+        # CORE FIX: The PDF needs the qualitative summary from the LLM.
+        # We can't regenerate it, but we can extract it from the saved analysis.
+        # This simulates the hybrid approach without needing a live agent run.
+        llm_summary = {
+            "strategic_summary": report.analysis.strategic_summary,
+            "brand_archetypes": json.loads(report.analysis.brand_archetype_summary)
+        }
+        
+        pdf_bytes = create_report_pdf(report, llm_summary)
+        
         filename = f"Alloy_Report_{report.acquirer_brand}_vs_{report.target_brand}.pdf"
-        return Response(content=pdf_bytes, media_type="application/pdf", headers={'Content-Disposition': f'attachment; filename="{filename}"'})
+        headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
+        return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
+        
     except Exception as e:
         logger.error(f"Failed to generate PDF for report {report_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to generate PDF report.")
