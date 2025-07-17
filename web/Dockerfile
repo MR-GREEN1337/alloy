@@ -24,6 +24,14 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
+# --- THIS IS THE CRITICAL FIX ---
+# The build argument must be declared in the stage where it is used.
+# The variable name here MUST match the --build-arg in the `docker build` command.
+ARG NEXT_PUBLIC_API_URL
+# Now, set it as an environment variable for the `npm run build` command.
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+# ------------------------------
+
 ENV NEXT_TELEMETRY_DISABLED=1
 
 # Robust NPM download
@@ -57,8 +65,5 @@ RUN mkdir -p .next && chown nextjs:nodejs .next
 USER nextjs
 
 EXPOSE 3000
-
-HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1
 
 CMD ["node", "server.js"]

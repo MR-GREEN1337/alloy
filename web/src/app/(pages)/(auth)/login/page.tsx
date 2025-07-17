@@ -22,7 +22,7 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [isGuestLoading, setIsGuestLoading] = useState(false);
-  const { login } = useAuth();
+  const { login, apiUrl } = useAuth(); // Get apiUrl from context
   const router = useRouter();
   const searchParams = useSearchParams();
   const isLoading = isLoggingIn || isGuestLoading;
@@ -37,7 +37,8 @@ export default function LoginPage() {
     formData.append('password', password);
 
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/login`, {
+      // Use relative path for fetch, it will be handled by the rewrite proxy
+      const res = await fetch(`/api/v1/auth/login`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
@@ -66,7 +67,8 @@ export default function LoginPage() {
     setError(null);
     setIsGuestLoading(true);
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/guest`, {
+       // Use relative path for fetch
+      const res = await fetch(`/api/v1/auth/guest`, {
         method: 'POST',
       });
 
@@ -86,8 +88,8 @@ export default function LoginPage() {
     }
   };
 
-  // Google login is now a simple link to our backend
-  const googleAuthUrl = `${process.env.NEXT_PUBLIC_API_URL}/auth/google/authorize`;
+  // The Google Auth URL MUST be absolute and include the /api/v1 prefix.
+  const googleAuthUrl = `${apiUrl}/api/v1/auth/google/authorize`;
 
   return (
     <Card className="w-full max-w-sm">

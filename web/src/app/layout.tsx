@@ -24,12 +24,22 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // This is a Server Component, so it can safely access process.env at runtime.
+  // We use the same variable name for consistency.
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+
+  if (!apiUrl) {
+    // This will cause an error page in production if the env var is missing,
+    // which is better than a broken app.
+    throw new Error("FATAL: NEXT_PUBLIC_API_URL environment variable is not set.");
+  }
+
   return (
     <html lang="en">
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <AppProviders>{children}</AppProviders>
+        <AppProviders apiUrl={apiUrl}>{children}</AppProviders>
       <Toaster richColors position="bottom-right" />
       </body>
     </html>

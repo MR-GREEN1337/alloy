@@ -6,8 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 from fastapi.responses import StreamingResponse, Response
 import json
-import asyncio
 import google.generativeai as genai
+import uuid
 
 from src.db.postgresql import get_session, postgres_db
 from src.db import models
@@ -32,7 +32,8 @@ class ReportGeneratePayload(SQLModel):
     use_grounding: bool = False
 
 class DraftReportResponse(SQLModel):
-    id: int
+    # Change ID to UUID
+    id: uuid.UUID
     status: models.ReportStatus
     created_at: datetime
     user_id: int
@@ -48,7 +49,16 @@ class FileUploadResponse(SQLModel):
     message: str = "File processed successfully."
 
 # --- Helper Functions ---
-async def mark_report_as_failed(report_id: int) -> None:
+def _safe_float(value: any, default: float = 0.0) -> float:
+    """Safely converts a value to a float, returning a default if conversion fails."""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+async def mark_report_as_failed(report_id: uuid.UUID) -> None:
     try:
         async with postgres_db.get_session() as session:
             report = await session.get(models.Report, report_id)
@@ -65,7 +75,6 @@ async def synthesize_final_report(agent_data: dict) -> dict:
     logger.info("Synthesizing final report from agent data.")
     model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
     
-    # We only need the LLM for summaries, not for lists that the agent already created.
     data_for_synthesis = {
         key: value for key, value in agent_data.items() 
         if key not in ['culture_clashes', 'untapped_growths']
@@ -95,15 +104,16 @@ async def synthesize_final_report(agent_data: dict) -> dict:
     try:
         response = await model.generate_content_async(prompt, generation_config={"response_mime_type": "application/json"})
         report = json.loads(response.text)
-        report['cultural_compatibility_score'] = report.get('cultural_compatibility_score', 0.0)
-        report['affinity_overlap_score'] = report.get('affinity_overlap_score', 0.0)
+        # Use the safe conversion helper here as well
+        report['cultural_compatibility_score'] = _safe_float(report.get('cultural_compatibility_score'))
+        report['affinity_overlap_score'] = _safe_float(report.get('affinity_overlap_score'))
         return report
     except Exception as e:
         logger.error(f"Final report synthesis failed: {e}")
         return {
             "strategic_summary": "Analysis failed during final synthesis. Key data may be missing.",
             "cultural_compatibility_score": 0.0,
-            "affinity_overlap_score": agent_data.get('qloo_analysis', {}).get('affinity_overlap_score', 0.0),
+            "affinity_overlap_score": _safe_float(agent_data.get('qloo_analysis', {}).get('affinity_overlap_score')),
             "brand_archetype_summary": {"acquirer_archetype": "N/A", "target_archetype": "N/A"},
             "corporate_ethos_summary": {"acquirer_ethos": "N/A", "target_ethos": "N/A"},
             "financial_synthesis": "N/A"
@@ -121,7 +131,7 @@ async def create_draft_report(session: AsyncSession = Depends(get_session), curr
     return new_report
 
 @router.post("/{report_id}/upload_context_file", response_model=FileUploadResponse)
-async def upload_context_file(report_id: int, file: UploadFile = File(...), session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
+async def upload_context_file(report_id: uuid.UUID, file: UploadFile = File(...), session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     report = await session.get(models.Report, report_id)
     if not report or report.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found or access denied.")
@@ -132,7 +142,7 @@ async def upload_context_file(report_id: int, file: UploadFile = File(...), sess
     return FileUploadResponse(filename=file.filename, content_type=file.content_type or "application/octet-stream", size_in_bytes=file.size)
 
 @router.post("/{report_id}/generate")
-async def generate_full_report_stream(report_id: int, payload: ReportGeneratePayload, current_user: models.User = Depends(get_current_user)):
+async def generate_full_report_stream(report_id: uuid.UUID, payload: ReportGeneratePayload, current_user: models.User = Depends(get_current_user)):
     
     async def event_generator() -> AsyncGenerator[str, None]:
         def format_sse_event(data: dict) -> str:
@@ -184,36 +194,36 @@ async def generate_full_report_stream(report_id: int, payload: ReportGeneratePay
 
             yield f"data: {json.dumps({'status': 'saving', 'message': 'Saving final analysis to database'})}\n\n"
             async with postgres_db.get_session() as save_session:
-                # Get the report object.
-                save_report = await save_session.get(models.Report, report_id)
+                # Eagerly load relationships to ensure they are available for modification
+                stmt = select(models.Report).where(models.Report.id == report_id).options(
+                    selectinload(models.Report.analysis),
+                    selectinload(models.Report.culture_clashes),
+                    selectinload(models.Report.untapped_growths)
+                )
+                result = await save_session.execute(stmt)
+                save_report = result.scalar_one_or_none()
+
                 if not save_report:
                     raise Exception("Report not found during save operation.")
+                
+                logger.info(f"Report {report_id}: Replacing analysis and child collections.")
 
-                # The `cascade="all, delete-orphan"` on the relationship
-                # means we don't need to manually delete the old analysis.
-                # Simply creating and assigning a new one will replace it.
-                
-                # First, clear any existing related items that are managed by cascade
-                # This ensures a clean slate before adding new ones.
-                save_report.culture_clashes.clear()
-                save_report.untapped_growths.clear()
-                
-                # Use a flush to persist the deletions before adding new items
-                await save_session.flush()
-                
-                # Create the new analysis object
-                new_analysis = models.ReportAnalysis(
-                    report_id=save_report.id, # Redundant due to relationship but safe
-                    cultural_compatibility_score=final_report_summary.get('cultural_compatibility_score', 0.0),
-                    affinity_overlap_score=final_report_summary.get('affinity_overlap_score', 0.0),
+                # This is a robust way to replace related objects.
+                # By assigning a new object/list to the relationship attribute,
+                # SQLAlchemy's `delete-orphan` cascade handles the removal of old items.
+                save_report.analysis = models.ReportAnalysis(
+                    report_id=save_report.id, 
+                    # THE FIX: Use the safe float conversion for all float fields
+                    cultural_compatibility_score=_safe_float(final_report_summary.get('cultural_compatibility_score')),
+                    affinity_overlap_score=_safe_float(final_report_summary.get('affinity_overlap_score')),
                     brand_archetype_summary=json.dumps(final_report_summary.get('brand_archetype_summary', {})),
                     corporate_ethos_summary=json.dumps(final_report_summary.get('corporate_ethos_summary', {})),
                     strategic_summary=final_report_summary.get('strategic_summary', 'Analysis failed.'),
                     financial_synthesis=final_report_summary.get('financial_synthesis', 'Analysis failed.'),
-                    acquirer_corporate_profile=agent_final_data.get('acquirer_culture_profile'),
-                    target_corporate_profile=agent_final_data.get('target_culture_profile'),
-                    acquirer_financial_profile=agent_final_data.get('acquirer_financial_profile'),
-                    target_financial_profile=agent_final_data.get('target_financial_profile'),
+                    acquirer_corporate_profile=agent_final_data.get('acquirer_culture_profile') or "",
+                    target_corporate_profile=agent_final_data.get('target_culture_profile') or "",
+                    acquirer_financial_profile=agent_final_data.get('acquirer_financial_profile') or "",
+                    target_financial_profile=agent_final_data.get('target_financial_profile') or "",
                     search_sources=agent.all_sources.get('search_sources', []),
                     acquirer_sources=agent.all_sources.get('acquirer_sources', []),
                     target_sources=agent.all_sources.get('target_sources', []),
@@ -223,34 +233,32 @@ async def generate_full_report_stream(report_id: int, payload: ReportGeneratePay
                     target_financial_sources=agent.all_sources.get('target_financial_sources', [])
                 )
 
-                # Assign the new analysis to the report.
-                save_report.analysis = new_analysis
+                save_report.culture_clashes = [
+                    models.CultureClash(report_id=save_report.id, **clash) for clash in agent_final_data.get('culture_clashes', [])
+                ]
+                save_report.untapped_growths = [
+                    models.UntappedGrowth(report_id=save_report.id, **growth) for growth in agent_final_data.get('untapped_growths', [])
+                ]
                 
-                # Add new clashes and growths
-                for clash in agent_final_data.get('culture_clashes', []):
-                    save_report.culture_clashes.append(models.CultureClash(**clash))
-                for growth in agent_final_data.get('untapped_growths', []):
-                    save_report.untapped_growths.append(models.UntappedGrowth(**growth))
-                
-                # Update status and add to session
                 save_report.status = models.ReportStatus.COMPLETED
                 save_session.add(save_report)
                 
-                # The final commit will save everything due to the cascade settings.
+                logger.info(f"Report {report_id}: Committing final report to the database.")
                 await save_session.commit()
+                logger.success(f"Report {report_id}: Final report committed successfully.")
                 generation_succeeded = True
             
-            yield f"data: {json.dumps({'status': 'complete', 'message': 'Report generated successfully!', 'payload': {'reportId': report_id}})}\n\n"
+            yield f"data: {json.dumps({'status': 'complete', 'message': 'Report generated successfully!', 'payload': {'reportId': str(report_id)}})}\n\n"
         except Exception as e:
-            logger.error(f"Error in report generation stream for report {report_id}", exc_info=True)
-            yield f"data: {json.dumps({'status': 'error', 'message': 'An unexpected error occurred during report generation.'})}\n\n"
+            logger.error("Error in report generation stream for report {}: {}: {}", report_id, type(e).__name__, e, exc_info=True)
+            yield f"data: {json.dumps({'status': 'error', 'message': f'An unexpected error occurred during report generation: {type(e).__name__}'})}\n\n"
         finally:
             if not generation_succeeded and report_to_generate: await mark_report_as_failed(report_id)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @router.get("/{report_id}/download-pdf")
-async def download_report_pdf(report_id: int, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
+async def download_report_pdf(report_id: uuid.UUID, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     """Generates and downloads a professional PDF report."""
     logger.info(f"User {current_user.email} requested PDF for report {report_id}")
     
@@ -290,26 +298,49 @@ async def download_report_pdf(report_id: int, session: AsyncSession = Depends(ge
 
 @router.get("/", response_model=List[models.ReportRead])
 async def get_reports(session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
-    statement = select(models.Report).where(models.Report.user_id == current_user.id, models.Report.status != models.ReportStatus.DRAFT).order_by(models.Report.created_at.desc()).options(selectinload(models.Report.analysis), selectinload(models.Report.culture_clashes), selectinload(models.Report.untapped_growths))
+    statement = (
+        select(models.Report)
+        .where(
+            models.Report.user_id == current_user.id,
+            models.Report.status != models.ReportStatus.DRAFT,
+        )
+        .order_by(models.Report.created_at.desc())
+        .options(
+            selectinload(models.Report.analysis),
+            selectinload(models.Report.culture_clashes),
+            selectinload(models.Report.untapped_growths),
+        )
+    )
     result = await session.execute(statement)
-    return list(result.scalars().all())
+    db_reports = result.scalars().all()
+    
+    # DEFINITIVE FIX: The most robust way to return complex ORM models is a two-step process:
+    # 1. Validate the database objects against the Pydantic "Read" schemas.
+    pydantic_reports = [models.ReportRead.model_validate(report) for report in db_reports]
+    # 2. Dump the validated Pydantic models into pure Python dictionaries. This strips all
+    #    ORM-specific state, leaving a clean structure that FastAPI can reliably serialize.
+    return [report.model_dump() for report in pydantic_reports]
+
 
 @router.get("/{report_id}", response_model=models.ReportRead)
-async def get_report(report_id: int, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
+async def get_report(report_id: uuid.UUID, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     statement = select(models.Report).where(models.Report.id == report_id, models.Report.user_id == current_user.id).options(selectinload(models.Report.analysis), selectinload(models.Report.culture_clashes), selectinload(models.Report.untapped_growths))
     result = await session.execute(statement)
     report = result.scalar_one_or_none()
     if not report or (report.status == models.ReportStatus.DRAFT and report.user_id != current_user.id): raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found")
-    return report
+
+    # DEFINITIVE FIX: Apply the same validate-then-dump pattern for consistency and robustness.
+    pydantic_report = models.ReportRead.model_validate(report)
+    return pydantic_report.model_dump()
 
 @router.delete("/{report_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_report(report_id: int, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
+async def delete_report(report_id: uuid.UUID, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     report_to_delete = await session.get(models.Report, report_id)
     if not report_to_delete or report_to_delete.user_id != current_user.id: raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found")
     await session.delete(report_to_delete); await session.commit()
 
 @router.post("/{report_id}/chat", response_class=StreamingResponse)
-async def chat_with_report(report_id: int, payload: ReportChatPayload, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
+async def chat_with_report(report_id: uuid.UUID, payload: ReportChatPayload, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     report = await session.get(models.Report, report_id)
     if not report or report.user_id != current_user.id: raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found.")
     async def stream_response():

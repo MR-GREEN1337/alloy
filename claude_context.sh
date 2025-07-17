@@ -16,6 +16,9 @@ echo "[2/4] Appending backend source files (*.py)..."
 find backend/src -name "*.py" -exec sh -c '
   echo "File: {}" >> claude_context.txt && cat {} >> claude_context.txt && echo -e "\n-e\n" >> claude_context.txt
 ' \;
+find backend/tests -name "*.py" -exec sh -c '
+  echo "File: {}" >> claude_context.txt && cat {} >> claude_context.txt && echo -e "\n-e\n" >> claude_context.txt
+' \;
 
 # --- Step 3: Append Web App Source (Next.js/React) ---
 echo "[3/4] Appending web source files (*.ts, *.tsx)..."
@@ -30,6 +33,9 @@ echo "[4/4] Appending directory trees and project prompt..."
   echo ""
   echo "Backend Tree:"
   tree backend/src
+  echo ""
+  echo "Backend Tests Tree:"
+  tree backend/tests
   echo ""
   echo "Web App Tree:"
   tree web/src

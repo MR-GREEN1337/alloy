@@ -69,7 +69,7 @@ async def find_official_website(brand_name: str) -> Optional[str]:
         You are a research assistant. Your only task is to find the official homepage URL for a given company.
         Return ONLY the URL and nothing else. Do not add any explanatory text, markdown, or greetings.
         If you cannot find a definitive official website, return the text "NOT_FOUND".
-
+    
         Company Name: "{brand_name}"
         Official URL:
         """

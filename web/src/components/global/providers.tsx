@@ -30,11 +30,12 @@ interface AuthContextType {
   logout: () => void;
   isAuthenticated: boolean;
   isLoading: boolean;
+  apiUrl: string; // Add apiUrl to the context
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
+export const AuthProvider = ({ children, apiUrl }: { children: React.ReactNode, apiUrl: string }) => {
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -76,6 +77,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     logout,
     isAuthenticated: !!accessToken,
     isLoading,
+    apiUrl, // Provide the runtime URL to the context
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
@@ -89,6 +91,6 @@ export const useAuth = () => {
   return context;
 };
 
-export const AppProviders = ({ children }: { children: React.ReactNode }) => {
-    return <AuthProvider>{children}</AuthProvider>
+export const AppProviders = ({ children, apiUrl }: { children: React.ReactNode; apiUrl: string }) => {
+    return <AuthProvider apiUrl={apiUrl}>{children}</AuthProvider>
 };

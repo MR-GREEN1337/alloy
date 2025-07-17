@@ -18,7 +18,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../ui/collapsible";
 
-// API MUTATIONs
+// API MUTATION
 const createDraftReport = async (url: string, { arg }: { arg: { token: string }}) => {
     const res = await fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${arg.token}` } });
     if (!res.ok) throw new Error('Failed to create draft session.');
@@ -27,7 +27,7 @@ const createDraftReport = async (url: string, { arg }: { arg: { token: string }}
 
 // TYPES
 interface Step {
-  id: string; // Should be unique
+  id: string;
   status: 'info' | 'search' | 'source' | 'analysis' | 'reasoning' | 'synthesis' | 'saving' | 'complete' | 'error';
   message?: string;
   payload?: any;
@@ -58,7 +58,8 @@ TooltipContent.displayName = TooltipPrimitive.Content.displayName;
 
 const SourceItem = ({ source }: { source: { url: string, title?: string }}) => {
     const domain = new URL(source.url).hostname?.replace('www.', '');
-    const faviconUrl = `${process.env.NEXT_PUBLIC_API_URL}/utils/favicon?url=${encodeURIComponent(source.url)}`;
+    const { apiUrl } = useAuth();
+    const faviconUrl = `${apiUrl}/api/v1/utils/favicon?url=${encodeURIComponent(source.url)}`;
     return (
         <Link href={source.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 group">
             <Image src={faviconUrl} alt="source favicon" width={16} height={16} className="rounded-full" unoptimized/>
@@ -68,13 +69,14 @@ const SourceItem = ({ source }: { source: { url: string, title?: string }}) => {
 };
 
 const FaviconPreview = ({ url }: { url: string }) => {
-    const faviconUrl = `${process.env.NEXT_PUBLIC_API_URL}/utils/favicon?url=${encodeURIComponent(url)}`;
+    const { apiUrl } = useAuth();
+    const faviconUrl = `${apiUrl}/api/v1/utils/favicon?url=${encodeURIComponent(url)}`;
     return <Image src={faviconUrl} alt="favicon" width={16} height={16} className="rounded-full" unoptimized/>;
 }
 
 const StepItem = ({ step }: { step: Step }) => {
     const ICONS = {
-        info: <Bot className="h-4 w-4 text-foreground" />,
+        info: <Bot className="h-4 w-4 text-primary" />,
         search: <Search className="h-4 w-4 text-blue-500" />,
         source: <LinkIcon className="h-4 w-4 text-muted-foreground" />,
         analysis: <Microscope className="h-4 w-4 text-purple-500" />,
@@ -87,7 +89,7 @@ const StepItem = ({ step }: { step: Step }) => {
 
     const renderContent = () => {
         if (step.status === 'source' && step.payload) {
-            return <SourceItem source={{ url: step.payload.url, title: step.payload.title }} />;
+            return <SourceItem source={step.payload} />;
         }
         return step.message;
     };
@@ -106,8 +108,8 @@ const StepItem = ({ step }: { step: Step }) => {
 // --- MAIN COMPONENT ---
 export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxProps>(
   ({ onReportCreated, onPristineChange, className }, ref) => {
-    const { accessToken } = useAuth();
-    const API_URL = process.env.NEXT_PUBLIC_API_URL;
+    const { accessToken, apiUrl } = useAuth();
+    const API_URL = apiUrl;
 
     const [draftReportId, setDraftReportId] = useState<number | null>(null);
     const [acquirer, setAcquirer] = useState("");
@@ -124,7 +126,7 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
     const fileInputRef = useRef<HTMLInputElement>(null);
     const scrollAreaRef = useRef<HTMLDivElement>(null);
 
-    const { trigger: triggerDraft, isMutating: isCreatingDraft } = useSWRMutation(`${API_URL}/reports/draft`, createDraftReport);
+    const { trigger: triggerDraft, isMutating: isCreatingDraft } = useSWRMutation(`${API_URL}/api/v1/reports/draft`, createDraftReport);
     const isLoading = isCreatingDraft || isGenerating || uploadedFile?.status === 'uploading';
 
     useEffect(() => {
@@ -146,7 +148,7 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
         const formData = new FormData();
         formData.append('file', file);
         try {
-            const res = await fetch(`${API_URL}/reports/${draftReportId}/upload_context_file`, { method: 'POST', headers: { 'Authorization': `Bearer ${accessToken!}` }, body: formData });
+            const res = await fetch(`${API_URL}/api/v1/reports/${draftReportId}/upload_context_file`, { method: 'POST', headers: { 'Authorization': `Bearer ${accessToken!}` }, body: formData });
             if (!res.ok) { const errorData = await res.json(); throw new Error(errorData.detail || 'File upload failed'); }
             setUploadedFile({ id: fileId, name: file.name, status: 'success', message: 'Context uploaded' });
             toast.success("Context file uploaded successfully.");
@@ -164,7 +166,7 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
         setIsGenerating(true); setLogSteps([]); setSources([]); setIsCollapsibleOpen(true);
         
         try {
-            const response = await fetch(`${API_URL}/reports/${draftReportId}/generate`, {
+            const response = await fetch(`${API_URL}/api/v1/reports/${draftReportId}/generate`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken!}` },
                 body: JSON.stringify({ acquirer_brand: acquirer, target_brand: target, title: `${acquirer} vs. ${target}`, context: notes, use_grounding: useGrounding })
             });

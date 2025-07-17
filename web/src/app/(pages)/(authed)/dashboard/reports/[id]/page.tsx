@@ -24,18 +24,18 @@ const fetcher = (url: string, token: string) =>
 export default function ReportPage() {
     const { id } = useParams<{ id: string }>();
     const { accessToken } = useAuth();
-    const API_URL = process.env.NEXT_PUBLIC_API_URL;
     const { data: report, error, isLoading } = useSWR(
-        accessToken ? [`${API_URL}/reports/${id}`, accessToken] : null,
+        accessToken ? [`/api/v1/reports/${id}`, accessToken] : null,
         ([url, token]) => fetcher(url, token)
     );
+    console.log(report);
     const [isDownloading, setIsDownloading] = useState(false);
 
     const handleDownload = async () => {
         if (!report || !accessToken) return;
         setIsDownloading(true);
         try {
-            const res = await fetch(`${API_URL}/reports/${report.id}/download-pdf`, {
+            const res = await fetch(`/api/v1/reports/${report.id}/download-pdf`, {
                 headers: { 'Authorization': `Bearer ${accessToken}` }
             });
             if (!res.ok) {

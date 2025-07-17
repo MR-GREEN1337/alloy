@@ -24,7 +24,6 @@ interface AIAnalystChatProps {
 
 export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
   const { accessToken } = useAuth();
-  const API_URL = process.env.NEXT_PUBLIC_API_URL;
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -60,7 +59,7 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
         Untapped Growth: ${report.untapped_growths.map(g => `- ${g.description} (Impact: ${g.potential_impact_score})`).join('\n')}
       `;
 
-      const res = await fetch(`${API_URL}/reports/${report.id}/chat`, {
+      const res = await fetch(`/api/v1/reports/${report.id}/chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

@@ -45,7 +45,7 @@ const fetcher = (url: string, token: string): Promise<Report[]> =>
     return res.json();
   });
 
-async function deleteReport(url: string, { arg }: { arg: { reportId: number, token: string } }) {
+async function deleteReport(url: string, { arg }: { arg: { reportId: string, token: string } }) {
     const response = await fetch(`${url}${arg.reportId}`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${arg.token}` }
@@ -78,14 +78,13 @@ const StatusBadge = ({ status }: { status: Report['status'] }) => {
 // --- Main Reports Page Component ---
 export default function ReportsPage() {
     const { accessToken } = useAuth();
-    const API_URL = process.env.NEXT_PUBLIC_API_URL;
     const { data: reports, error, mutate, isLoading } = useSWR(
-        accessToken ? [`${API_URL}/reports/`, accessToken] : null,
+        accessToken ? [`/api/v1/reports`, accessToken] : null,
         ([url, token]) => fetcher(url, token)
     );
-    const { trigger: triggerDelete } = useSWRMutation(`${API_URL}/reports/`, deleteReport);
+    const { trigger: triggerDelete } = useSWRMutation(`/api/v1/reports`, deleteReport);
 
-    const handleDelete = async (reportId: number) => {
+    const handleDelete = async (reportId: string) => {
         toast.info("Deleting report...");
         try {
             await triggerDelete({ reportId, token: accessToken! });

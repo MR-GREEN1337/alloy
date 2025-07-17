@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     POSTGRES_USE_SSL: bool = True
 
     # CORS & Frontend
-    CORS_ORIGINS: list[str] = ["http://localhost:3000"]
+    CORS_ORIGINS: list[str]
 
 @lru_cache
 def get_settings():

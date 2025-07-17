@@ -45,12 +45,14 @@ async def get_user_by_email(session: AsyncSession, email: str) -> Optional[model
 -e
 
 File: backend/src/core/settings.py
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
+import os
 
 class Settings(BaseSettings):
-    class Config:
-        env_file = ".env"
+    model_config = SettingsConfigDict(
+        env_file=".env.test" if os.getenv("ENVIRONMENT") == "test" else ".env"
+    )
 
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
@@ -83,7 +85,7 @@ class Settings(BaseSettings):
     POSTGRES_USE_SSL: bool = True
 
     # CORS & Frontend
-    CORS_ORIGINS: list[str] = ["http://localhost:3000"]
+    CORS_ORIGINS: list[str]
 
 @lru_cache
 def get_settings():
@@ -95,56 +97,16 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from loguru import logger
 import time
-import sys
-import json
-
 from src.db.postgresql import postgres_db
 from src.core.settings import get_settings
 from src.db.models import rebuild_all_models
 
 settings = get_settings()
 
-# --- Structured Logging Configuration ---
-class JsonLogFormatter:
-    def format(self, record):
-        log_object = {
-            "timestamp": record["time"].isoformat(),
-            "level": record["level"].name,
-            "message": record["message"],
-            "source": {
-                "name": record["name"],
-                "file": record["file"].path,
-                "line": record["line"],
-            },
-        }
-        if record["extra"]:
-            log_object["extra"] = record["extra"]
-        if record["exception"]:
-            log_object["exception"] = str(record["exception"])
-            
-        return json.dumps(log_object) + "\n"
-
-def setup_logging():
-    """
-    Configures logging.
-    Uses a structured JSON format for non-development environments
-    and Loguru's default, human-friendly format for development.
-    """
-    logger.remove()
-    
-    if settings.ENVIRONMENT != "development":
-        # For production, staging, etc., use the JSON formatter
-        log_format = JsonLogFormatter().format
-        logger.add(sys.stderr, level="INFO", format=log_format)
-    else:
-        # For local development, use the default, colorful Loguru format
-        logger.add(sys.stderr, level="INFO")
-
 # --- Lifespan Manager ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- SETUP PHASE ---
-    setup_logging()
     logger.info(f"Starting up in {settings.ENVIRONMENT} mode...")
     start_time = time.time()
     
@@ -333,15 +295,16 @@ File: backend/src/db/models/__init__.py
 from __future__ import annotations
 import enum
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone 
+import uuid 
 from sqlmodel import Field, SQLModel, Relationship as SQLModelRelationship
 from sqlalchemy.orm import relationship
-from sqlalchemy import Column, DateTime, func, TEXT, JSON
+from sqlalchemy import Column, DateTime, func, TEXT, JSON, ForeignKey # Import ForeignKey
+from sqlalchemy.dialects.postgresql import UUID
 
 from loguru import logger
 
 # --- Enums ---
-# These are now standard Python enums, not tied to the database type system.
 class ReportStatus(str, enum.Enum):
     DRAFT = "DRAFT"
     PENDING = "PENDING"
@@ -363,21 +326,38 @@ class User(SQLModel, table=True):
     hashed_password: Optional[str] = Field(default=None, nullable=True)
     is_active: bool = Field(default=True)
     is_superuser: bool = Field(default=False)
-    created_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), server_default=func.now(), nullable=False))
-    updated_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), server_default=func.now(), nullable=False))
+    # THE FIX: Make updated_at non-optional and provide a default_factory
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc), 
+        sa_column=Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    )
     
     reports: List["Report"] = SQLModelRelationship(sa_relationship=relationship("Report", back_populates="user"))
 
 class Report(SQLModel, table=True):
     __tablename__ = 'report'
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        sa_column=Column(
+            UUID(as_uuid=True),
+            primary_key=True,
+            index=True,
+            nullable=False
+        )
+    )
     title: str = Field(index=True, default="Untitled Report")
     acquirer_brand: Optional[str] = Field(default=None)
     target_brand: Optional[str] = Field(default=None)
     status: ReportStatus = Field(default=ReportStatus.DRAFT, sa_column=Column(TEXT, nullable=False))
     extracted_file_context: Optional[str] = Field(default=None, sa_column=Column(TEXT))
-    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime(timezone=True), server_default=func.now(), nullable=False))
-    updated_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), server_default=func.now(), nullable=False))
+    # THE FIX: Make updated_at non-optional and provide a default_factory
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    )
+    # Note: user_id still references the integer PK of the User table
     user_id: int = Field(foreign_key="user.id")
 
     user: "User" = SQLModelRelationship(sa_relationship=relationship("User", back_populates="reports"))
@@ -390,9 +370,10 @@ class ReportAnalysis(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     cultural_compatibility_score: float = Field(index=True)
     affinity_overlap_score: float
-    brand_archetype_summary: str = Field(sa_column=Column(TEXT))
-    strategic_summary: str = Field(sa_column=Column(TEXT))
-    report_id: int = Field(foreign_key="report.id")
+    # THE FIX: Mark all LLM-generated text fields as Optional to handle generation failures.
+    brand_archetype_summary: Optional[str] = Field(default=None, sa_column=Column(TEXT))
+    strategic_summary: Optional[str] = Field(default=None, sa_column=Column(TEXT))
+    report_id: uuid.UUID = Field(sa_column=Column(UUID(as_uuid=True), ForeignKey("report.id")))
     search_sources: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON))
     acquirer_sources: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON))
     target_sources: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON))
@@ -419,7 +400,7 @@ class CultureClash(SQLModel, table=True):
     topic: str = Field(index=True)
     description: str = Field(sa_column=Column(TEXT))
     severity: ClashSeverity = Field(sa_column=Column(TEXT, nullable=False))
-    report_id: int = Field(foreign_key="report.id")
+    report_id: uuid.UUID = Field(sa_column=Column(UUID(as_uuid=True), ForeignKey("report.id")))
     
     report: "Report" = SQLModelRelationship(sa_relationship=relationship("Report", back_populates="culture_clashes"))
 
@@ -428,19 +409,59 @@ class UntappedGrowth(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     description: str = Field(sa_column=Column(TEXT))
     potential_impact_score: int
-    report_id: int = Field(foreign_key="report.id")
+    report_id: uuid.UUID = Field(sa_column=Column(UUID(as_uuid=True), ForeignKey("report.id")))
     
     report: "Report" = SQLModelRelationship(sa_relationship=relationship("Report", back_populates="untapped_growths"))
 
 
 # --- API Schemas ---
+# FIX: Create dedicated "Read" schemas for nested models to break circular
+# dependencies during serialization. The table models (e.g., ReportAnalysis)
+# contain back-references to the parent Report model, which causes an
+# infinite recursion loop when FastAPI tries to generate the response. These
+# Read models omit the problematic back-reference.
+
+class ReportAnalysisRead(SQLModel):
+    id: Optional[int]
+    cultural_compatibility_score: float
+    affinity_overlap_score: float
+    brand_archetype_summary: Optional[str]
+    strategic_summary: Optional[str]
+    report_id: uuid.UUID
+    search_sources: Optional[List[Dict[str, Any]]]
+    acquirer_sources: Optional[List[Dict[str, Any]]]
+    target_sources: Optional[List[Dict[str, Any]]]
+    acquirer_corporate_profile: Optional[str]
+    target_corporate_profile: Optional[str]
+    corporate_ethos_summary: Optional[str]
+    acquirer_culture_sources: Optional[List[Dict[str, Any]]]
+    target_culture_sources: Optional[List[Dict[str, Any]]]
+    acquirer_financial_profile: Optional[str]
+    target_financial_profile: Optional[str]
+    financial_synthesis: Optional[str]
+    acquirer_financial_sources: Optional[List[Dict[str, Any]]]
+    target_financial_sources: Optional[List[Dict[str, Any]]]
+
+class CultureClashRead(SQLModel):
+    id: Optional[int]
+    topic: str
+    description: str
+    severity: ClashSeverity
+    report_id: uuid.UUID
+
+class UntappedGrowthRead(SQLModel):
+    id: Optional[int]
+    description: str
+    potential_impact_score: int
+    report_id: uuid.UUID
+
 class ReportCreate(SQLModel):
     title: str
     acquirer_brand: str
     target_brand: str
 
 class ReportRead(SQLModel):
-    id: int
+    id: uuid.UUID
     title: str
     acquirer_brand: Optional[str]
     target_brand: Optional[str]
@@ -448,9 +469,10 @@ class ReportRead(SQLModel):
     created_at: datetime
     updated_at: datetime
     user_id: int
-    analysis: Optional["ReportAnalysis"] = None
-    culture_clashes: List[CultureClash] = []
-    untapped_growths: List[UntappedGrowth] = []
+    # Use the new Read schemas to prevent circular references
+    analysis: Optional[ReportAnalysisRead] = None
+    culture_clashes: List[CultureClashRead] = []
+    untapped_growths: List[UntappedGrowthRead] = []
 
 # DEFINITIVE FIX: Function to resolve all forward references before DB operations.
 def rebuild_all_models():
@@ -461,14 +483,29 @@ def rebuild_all_models():
     with inter-dependencies.
     """
     logger.info("Rebuilding all model forward references...")
-    # Add any other models with forward references here if needed.
-    ReportRead.model_rebuild()
+    # This is crucial. We must rebuild all models that have relationships
+    # or forward references to ensure the type hints are resolved before FastAPI
+    # attempts to perform serialization. This is especially true for the
+    # DB models (User, Report, etc.) and the API models (ReportRead, etc.).
+    User.model_rebuild()
+    ReportAnalysis.model_rebuild()
+    CultureClash.model_rebuild()
+    UntappedGrowth.model_rebuild()
+    Report.model_rebuild() # Depends on the above
+
+    ReportCreate.model_rebuild()
+    ReportAnalysisRead.model_rebuild()
+    CultureClashRead.model_rebuild()
+    UntappedGrowthRead.model_rebuild()
+    ReportRead.model_rebuild() # Depends on the ...Read models
     logger.success("Model forward references rebuilt successfully.")
 
 __all__ = [
     "User", "Report", "ReportAnalysis", "CultureClash", "UntappedGrowth",
     "ReportStatus", "ClashSeverity",
     "ReportCreate", "ReportRead",
+    # Add new read models to __all__ for good practice
+    "ReportAnalysisRead", "CultureClashRead", "UntappedGrowthRead",
     "rebuild_all_models"
 ]-e 
 -e
@@ -479,7 +516,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from typing import Annotated, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 import httpx
 from loguru import logger
 import uuid
@@ -531,6 +568,33 @@ GUEST_NAMES = [
 ]
 
 # --- Helper Function ---
+def get_backend_base_url() -> str:
+    """
+    Determines the backend's base URL. In production, it uses the first
+    CORS origin (which should be the frontend URL) to derive the backend URL,
+    ensuring the correct scheme (https://) and domain.
+    """
+    # In a production/staging environment, trust the CORS origin setting.
+    # This assumes the frontend and backend are on the same domain.
+    # e.g., web is on https://alloy.app, backend is on https://alloy.app
+    if settings.ENVIRONMENT != "development":
+        # We assume the first CORS origin is the primary frontend URL.
+        # e.g., https://alloy-web-*.run.app
+        frontend_url = settings.CORS_ORIGINS[0]
+        parsed_uri = urlparse(frontend_url)
+        # We derive the backend URL from the web URL. This is a common pattern
+        # when they are hosted on subdomains of the same parent service.
+        # This part might need adjustment based on your specific CNAME/DNS setup.
+        # For Cloud Run, this simple replacement is often sufficient if you use a similar naming convention.
+        backend_host = parsed_uri.hostname.replace("web", "backend") if parsed_uri.hostname else "localhost"
+        return f"https://{backend_host}"
+    
+    # In development, you might be running on http://localhost:8000
+    # A more robust solution for dev would be to use an env var.
+    # For now, we will construct it simply.
+    return "http://localhost:8000"
+
+
 async def create_user_if_not_exists(session: AsyncSession, user_data: Dict[str, Any]) -> models.User:
     db_user = await get_user_by_email(session, user_data["email"])
     if db_user:
@@ -612,7 +676,18 @@ async def refresh_access_token(
 
 @router.get("/google/authorize", tags=["auth"], response_class=RedirectResponse)
 async def google_authorize(request: Request):
-    redirect_uri = f"{str(request.base_url).rstrip('/')}/api/v1/auth/google/callback"
+    # THE FIX: Use the request's own headers to determine the base URL
+    # This correctly handles https and the domain from behind a proxy.
+    # Cloud Run provides X-Forwarded-Proto and X-Forwarded-Host headers.
+    scheme = request.headers.get("x-forwarded-proto", "http")
+    host = request.headers.get("x-forwarded-host", request.url.netloc)
+    
+    # Construct the base URL and the final redirect URI
+    base_url = f"{scheme}://{host}"
+    redirect_uri = f"{base_url}/api/v1/auth/google/callback"
+    
+    logger.info(f"Generated Google redirect URI: {redirect_uri}")
+
     params = {
         "client_id": settings.GOOGLE_CLIENT_ID,
         "redirect_uri": redirect_uri,
@@ -630,7 +705,13 @@ async def google_callback(
     request: Request, code: str, session: DBSession
 ):
     """Handles the callback from Google, exchanges code for token, and gets user info."""
-    redirect_uri = f"{str(request.base_url).rstrip('/')}/api/v1/auth/google/callback"
+    # THE FIX: Reconstruct the redirect_uri exactly as it was in the authorize step.
+    scheme = request.headers.get("x-forwarded-proto", "http")
+    host = request.headers.get("x-forwarded-host", request.url.netloc)
+    base_url = f"{scheme}://{host}"
+    redirect_uri = f"{base_url}/api/v1/auth/google/callback"
+
+    logger.info(f"Handling Google callback for redirect URI: {redirect_uri}")
 
     token_data = {
         "code": code,
@@ -667,6 +748,7 @@ async def google_callback(
     refresh_token = create_refresh_token(data={"sub": user.email})
 
     params = urlencode({"access_token": access_token, "refresh_token": refresh_token})
+    # Use the first CORS origin as the definitive frontend URL to redirect back to.
     frontend_redirect_url = f"{settings.CORS_ORIGINS[0]}/token?{params}"
     
     return RedirectResponse(url=frontend_redirect_url)
@@ -871,8 +953,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 from fastapi.responses import StreamingResponse, Response
 import json
-import asyncio
 import google.generativeai as genai
+import uuid
 
 from src.db.postgresql import get_session, postgres_db
 from src.db import models
@@ -897,7 +979,8 @@ class ReportGeneratePayload(SQLModel):
     use_grounding: bool = False
 
 class DraftReportResponse(SQLModel):
-    id: int
+    # Change ID to UUID
+    id: uuid.UUID
     status: models.ReportStatus
     created_at: datetime
     user_id: int
@@ -913,7 +996,16 @@ class FileUploadResponse(SQLModel):
     message: str = "File processed successfully."
 
 # --- Helper Functions ---
-async def mark_report_as_failed(report_id: int) -> None:
+def _safe_float(value: any, default: float = 0.0) -> float:
+    """Safely converts a value to a float, returning a default if conversion fails."""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+async def mark_report_as_failed(report_id: uuid.UUID) -> None:
     try:
         async with postgres_db.get_session() as session:
             report = await session.get(models.Report, report_id)
@@ -928,9 +1020,8 @@ async def mark_report_as_failed(report_id: int) -> None:
 async def synthesize_final_report(agent_data: dict) -> dict:
     """Takes the agent's gathered data and synthesizes the final report with an LLM call."""
     logger.info("Synthesizing final report from agent data.")
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
     
-    # We only need the LLM for summaries, not for lists that the agent already created.
     data_for_synthesis = {
         key: value for key, value in agent_data.items() 
         if key not in ['culture_clashes', 'untapped_growths']
@@ -960,15 +1051,16 @@ async def synthesize_final_report(agent_data: dict) -> dict:
     try:
         response = await model.generate_content_async(prompt, generation_config={"response_mime_type": "application/json"})
         report = json.loads(response.text)
-        report['cultural_compatibility_score'] = report.get('cultural_compatibility_score', 0.0)
-        report['affinity_overlap_score'] = report.get('affinity_overlap_score', 0.0)
+        # Use the safe conversion helper here as well
+        report['cultural_compatibility_score'] = _safe_float(report.get('cultural_compatibility_score'))
+        report['affinity_overlap_score'] = _safe_float(report.get('affinity_overlap_score'))
         return report
     except Exception as e:
         logger.error(f"Final report synthesis failed: {e}")
         return {
             "strategic_summary": "Analysis failed during final synthesis. Key data may be missing.",
             "cultural_compatibility_score": 0.0,
-            "affinity_overlap_score": agent_data.get('qloo_analysis', {}).get('affinity_overlap_score', 0.0),
+            "affinity_overlap_score": _safe_float(agent_data.get('qloo_analysis', {}).get('affinity_overlap_score')),
             "brand_archetype_summary": {"acquirer_archetype": "N/A", "target_archetype": "N/A"},
             "corporate_ethos_summary": {"acquirer_ethos": "N/A", "target_ethos": "N/A"},
             "financial_synthesis": "N/A"
@@ -986,7 +1078,7 @@ async def create_draft_report(session: AsyncSession = Depends(get_session), curr
     return new_report
 
 @router.post("/{report_id}/upload_context_file", response_model=FileUploadResponse)
-async def upload_context_file(report_id: int, file: UploadFile = File(...), session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
+async def upload_context_file(report_id: uuid.UUID, file: UploadFile = File(...), session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     report = await session.get(models.Report, report_id)
     if not report or report.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found or access denied.")
@@ -997,7 +1089,7 @@ async def upload_context_file(report_id: int, file: UploadFile = File(...), sess
     return FileUploadResponse(filename=file.filename, content_type=file.content_type or "application/octet-stream", size_in_bytes=file.size)
 
 @router.post("/{report_id}/generate")
-async def generate_full_report_stream(report_id: int, payload: ReportGeneratePayload, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
+async def generate_full_report_stream(report_id: uuid.UUID, payload: ReportGeneratePayload, current_user: models.User = Depends(get_current_user)):
     
     async def event_generator() -> AsyncGenerator[str, None]:
         def format_sse_event(data: dict) -> str:
@@ -1017,18 +1109,26 @@ async def generate_full_report_stream(report_id: int, payload: ReportGeneratePay
                 else: event_data['status'] = 'info'; event_data['message'] = data.get("message")
             return f"data: {json.dumps(event_data)}\n\n"
 
-        report = None
+        report_to_generate = None
         generation_succeeded = False
         try:
-            report = await session.get(models.Report, report_id)
-            if not report or report.user_id != current_user.id or report.status != models.ReportStatus.DRAFT:
-                raise HTTPException(status.HTTP_404_NOT_FOUND, "Report not found or cannot be generated.")
+            async with postgres_db.get_session() as session:
+                report_to_generate = await session.get(models.Report, report_id)
+                if not report_to_generate or report_to_generate.user_id != current_user.id or report_to_generate.status != models.ReportStatus.DRAFT:
+                    error_data = json.dumps({'status': 'error', 'message': "Report not found or cannot be generated."})
+                    yield f"data: {error_data}\n\n"
+                    return
+
+                report_to_generate.acquirer_brand = payload.acquirer_brand
+                report_to_generate.target_brand = payload.target_brand
+                report_to_generate.title = payload.title
+                report_to_generate.status = models.ReportStatus.PENDING
+                session.add(report_to_generate)
+                await session.commit()
             
-            report.acquirer_brand, report.target_brand, report.title, report.status = payload.acquirer_brand, payload.target_brand, payload.title, models.ReportStatus.PENDING
-            session.add(report); await session.commit()
             yield f"data: {json.dumps({'status': 'info', 'message': f'Starting analysis for {payload.acquirer_brand} vs. {payload.target_brand}'})}\n\n"
 
-            agent = AlloyReActAgent(report.acquirer_brand, report.target_brand, (report.extracted_file_context or "") + "\n" + (payload.context or ""))
+            agent = AlloyReActAgent(report_to_generate.acquirer_brand, report_to_generate.target_brand, (report_to_generate.extracted_file_context or "") + "\n" + (payload.context or ""))
             async for event in agent.run_stream():
                 sse_event = format_sse_event(event)
                 if sse_event: yield sse_event
@@ -1041,24 +1141,36 @@ async def generate_full_report_stream(report_id: int, payload: ReportGeneratePay
 
             yield f"data: {json.dumps({'status': 'saving', 'message': 'Saving final analysis to database'})}\n\n"
             async with postgres_db.get_session() as save_session:
-                stmt = select(models.Report).options(selectinload(models.Report.analysis)).where(models.Report.id == report_id)
+                # Eagerly load relationships to ensure they are available for modification
+                stmt = select(models.Report).where(models.Report.id == report_id).options(
+                    selectinload(models.Report.analysis),
+                    selectinload(models.Report.culture_clashes),
+                    selectinload(models.Report.untapped_growths)
+                )
                 result = await save_session.execute(stmt)
                 save_report = result.scalar_one_or_none()
-                if not save_report: raise Exception("Report not found during save.")
-                if save_report.analysis: await save_session.delete(save_report.analysis); await save_session.flush()
+
+                if not save_report:
+                    raise Exception("Report not found during save operation.")
                 
-                analysis = models.ReportAnalysis(
-                    report_id=save_report.id,
-                    cultural_compatibility_score=final_report_summary.get('cultural_compatibility_score', 0.0),
-                    affinity_overlap_score=final_report_summary.get('affinity_overlap_score', 0.0),
+                logger.info(f"Report {report_id}: Replacing analysis and child collections.")
+
+                # This is a robust way to replace related objects.
+                # By assigning a new object/list to the relationship attribute,
+                # SQLAlchemy's `delete-orphan` cascade handles the removal of old items.
+                save_report.analysis = models.ReportAnalysis(
+                    report_id=save_report.id, 
+                    # THE FIX: Use the safe float conversion for all float fields
+                    cultural_compatibility_score=_safe_float(final_report_summary.get('cultural_compatibility_score')),
+                    affinity_overlap_score=_safe_float(final_report_summary.get('affinity_overlap_score')),
                     brand_archetype_summary=json.dumps(final_report_summary.get('brand_archetype_summary', {})),
                     corporate_ethos_summary=json.dumps(final_report_summary.get('corporate_ethos_summary', {})),
                     strategic_summary=final_report_summary.get('strategic_summary', 'Analysis failed.'),
                     financial_synthesis=final_report_summary.get('financial_synthesis', 'Analysis failed.'),
-                    acquirer_corporate_profile=agent_final_data.get('acquirer_culture_profile'),
-                    target_corporate_profile=agent_final_data.get('target_culture_profile'),
-                    acquirer_financial_profile=agent_final_data.get('acquirer_financial_profile'),
-                    target_financial_profile=agent_final_data.get('target_financial_profile'),
+                    acquirer_corporate_profile=agent_final_data.get('acquirer_culture_profile') or "",
+                    target_corporate_profile=agent_final_data.get('target_culture_profile') or "",
+                    acquirer_financial_profile=agent_final_data.get('acquirer_financial_profile') or "",
+                    target_financial_profile=agent_final_data.get('target_financial_profile') or "",
                     search_sources=agent.all_sources.get('search_sources', []),
                     acquirer_sources=agent.all_sources.get('acquirer_sources', []),
                     target_sources=agent.all_sources.get('target_sources', []),
@@ -1067,28 +1179,33 @@ async def generate_full_report_stream(report_id: int, payload: ReportGeneratePay
                     acquirer_financial_sources=agent.all_sources.get('acquirer_financial_sources', []),
                     target_financial_sources=agent.all_sources.get('target_financial_sources', [])
                 )
-                save_session.add(analysis)
 
-                # Get clashes and growths directly from the agent's data
-                for clash in agent_final_data.get('culture_clashes', []): save_session.add(models.CultureClash(report_id=save_report.id, **clash))
-                for growth in agent_final_data.get('untapped_growths', []): save_session.add(models.UntappedGrowth(report_id=save_report.id, **growth))
+                save_report.culture_clashes = [
+                    models.CultureClash(report_id=save_report.id, **clash) for clash in agent_final_data.get('culture_clashes', [])
+                ]
+                save_report.untapped_growths = [
+                    models.UntappedGrowth(report_id=save_report.id, **growth) for growth in agent_final_data.get('untapped_growths', [])
+                ]
                 
                 save_report.status = models.ReportStatus.COMPLETED
                 save_session.add(save_report)
+                
+                logger.info(f"Report {report_id}: Committing final report to the database.")
                 await save_session.commit()
+                logger.success(f"Report {report_id}: Final report committed successfully.")
                 generation_succeeded = True
             
-            yield f"data: {json.dumps({'status': 'complete', 'message': 'Report generated successfully!', 'payload': {'reportId': report_id}})}\n\n"
+            yield f"data: {json.dumps({'status': 'complete', 'message': 'Report generated successfully!', 'payload': {'reportId': str(report_id)}})}\n\n"
         except Exception as e:
-            logger.error(f"Error in report generation stream for report {report_id}", exc_info=True)
-            yield f"data: {json.dumps({'status': 'error', 'message': 'An unexpected error occurred during report generation.'})}\n\n"
+            logger.error("Error in report generation stream for report {}: {}: {}", report_id, type(e).__name__, e, exc_info=True)
+            yield f"data: {json.dumps({'status': 'error', 'message': f'An unexpected error occurred during report generation: {type(e).__name__}'})}\n\n"
         finally:
-            if not generation_succeeded and report: await mark_report_as_failed(report_id)
+            if not generation_succeeded and report_to_generate: await mark_report_as_failed(report_id)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @router.get("/{report_id}/download-pdf")
-async def download_report_pdf(report_id: int, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
+async def download_report_pdf(report_id: uuid.UUID, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     """Generates and downloads a professional PDF report."""
     logger.info(f"User {current_user.email} requested PDF for report {report_id}")
     
@@ -1128,12 +1245,12 @@ async def download_report_pdf(report_id: int, session: AsyncSession = Depends(ge
 
 @router.get("/", response_model=List[models.ReportRead])
 async def get_reports(session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
-    statement = select(models.Report).where(models.Report.user_id == current_user.id, models.Report.status != models.ReportStatus.DRAFT).order_by(models.Report.created_at.desc()).options(selectinload(models.Report.analysis), selectinload(models.Report.culture_clashes), selectinload(models.Report.untapped_growths))
+    statement = select(models.Report).where(models.Report.user_id == current_user.id, models.Report.status != models.ReportStatus.DRAFT).order_by(models.Report.created_at).options(selectinload(models.Report.analysis), selectinload(models.Report.culture_clashes), selectinload(models.Report.untapped_growths))
     result = await session.execute(statement)
     return list(result.scalars().all())
 
 @router.get("/{report_id}", response_model=models.ReportRead)
-async def get_report(report_id: int, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
+async def get_report(report_id: uuid.UUID, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     statement = select(models.Report).where(models.Report.id == report_id, models.Report.user_id == current_user.id).options(selectinload(models.Report.analysis), selectinload(models.Report.culture_clashes), selectinload(models.Report.untapped_growths))
     result = await session.execute(statement)
     report = result.scalar_one_or_none()
@@ -1141,13 +1258,13 @@ async def get_report(report_id: int, session: AsyncSession = Depends(get_session
     return report
 
 @router.delete("/{report_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_report(report_id: int, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
+async def delete_report(report_id: uuid.UUID, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     report_to_delete = await session.get(models.Report, report_id)
     if not report_to_delete or report_to_delete.user_id != current_user.id: raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found")
     await session.delete(report_to_delete); await session.commit()
 
 @router.post("/{report_id}/chat", response_class=StreamingResponse)
-async def chat_with_report(report_id: int, payload: ReportChatPayload, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
+async def chat_with_report(report_id: uuid.UUID, payload: ReportChatPayload, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     report = await session.get(models.Report, report_id)
     if not report or report.user_id != current_user.id: raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found.")
     async def stream_response():
@@ -1200,7 +1317,7 @@ import google.generativeai as genai
 from typing import List, Dict, Any, AsyncGenerator, Optional, Tuple, Set
 from loguru import logger
 import json
-import random
+import asyncio
 
 from src.core.settings import get_settings
 from src.services.search import web_search
@@ -1235,19 +1352,48 @@ async def _summarize_with_gemini(context: str, query: str) -> str:
         logger.error(f"Error during Gemini summarization: {e}")
         return "Could not summarize the search results due to an internal error."
 
-async def _find_qloo_id(client: httpx.AsyncClient, brand_name: str) -> Optional[Tuple[str, str]]:
-    """Finds the Qloo ID and canonical name for a brand."""
+async def _extract_cultural_proxies(context: str, brand_name: str) -> List[str]:
+    """Uses an LLM to identify 3-5 key cultural products/properties from a text."""
+    logger.info(f"Extracting cultural proxies for {brand_name}...")
+    if not context.strip():
+        return []
+    try:
+        model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
+        # CORE FIX: Generalize the prompt to work for more than just media companies.
+        prompt = f"""
+        Based *only* on the following text about '{brand_name}', identify the 3 to 5 most famous and culturally significant properties, products, shows, or public figures associated with them.
+        These items will be used as proxies to understand the brand's cultural footprint.
+
+        CONTEXT:
+        ---
+        {context}
+        ---
+
+        Return a single JSON array of strings. If no specific items are found, return an empty array. Example: ["Famous Product A", "Popular Show B"]
+        """
+        response = await model.generate_content_async(prompt, generation_config={"response_mime_type": "application/json"})
+        proxies = json.loads(response.text)
+        logger.success(f"Extracted proxies for {brand_name}: {proxies}")
+        return proxies
+    except Exception as e:
+        logger.error(f"Error during cultural proxy extraction for {brand_name}: {e}")
+        return []
+
+
+async def _find_qloo_id(client: httpx.AsyncClient, entity_name: str) -> Optional[Tuple[str, str]]:
+    """Finds the Qloo ID and canonical name for any cultural entity."""
     headers = {"x-api-key": settings.QLOO_API_KEY}
-    brand_variations = list(set([
-        brand_name,
-        brand_name.replace("Company", "").replace("Inc.", "").replace("Corp.", "").strip(),
-        brand_name.split(' ')[0],
+    entity_variations = list(set([
+        entity_name,
+        entity_name.title(),
+        entity_name.capitalize(),
     ]))
 
-    for variation in brand_variations:
+    for variation in entity_variations:
         if not variation: continue
         try:
-            search_payload = {"query": variation, "filter": {"type": "urn:entity:brand"}, "take": 1}
+            # Search across multiple relevant categories
+            search_payload = {"query": variation, "filter": {"type": ["urn:entity:movie", "urn:entity:tv_show", "urn:entity:brand", "urn:entity:person", "urn:entity:music_track"]}, "take": 1}
             search_url = "https://hackathon.api.qloo.com/v2/search"
             resp = await client.post(search_url, json=search_payload, headers=headers)
             if resp.status_code != 200: continue
@@ -1273,6 +1419,15 @@ async def _get_qloo_tastes(client: httpx.AsyncClient, qloo_id: str) -> List[Dict
         logger.error(f"Failed to fetch Qloo tastes for ID {qloo_id}: {e}")
         return []
 
+# --- THE FIX: Create a helper function for concurrent execution ---
+async def _get_tastes_for_term(client: httpx.AsyncClient, term: str) -> Set[str]:
+    """Finds Qloo ID for a term and returns a set of its audience tastes."""
+    qloo_info = await _find_qloo_id(client, term)
+    if qloo_info:
+        tastes = await _get_qloo_tastes(client, qloo_info[0])
+        return {t['name'] for t in tastes if 'name' in t}
+    return set()
+
 # --- Agent Tools ---
 
 async def _web_search_tool(query: str) -> Dict[str, Any]:
@@ -1282,153 +1437,127 @@ async def _web_search_tool(query: str) -> Dict[str, Any]:
     summary = await _summarize_with_gemini(search_result['context_str'], query)
     return {"context_str": summary, "sources": search_result["sources"]}
 
-async def _qloo_comparative_analysis_tool(acquirer_brand_name: str, target_brand_name: str) -> Dict[str, Any]:
-    """Performs a deep cultural comparison and returns a structured dictionary with pre-analyzed lists."""
-    logger.info(f"AGENT TOOL: Qloo Comparative Analysis for '{acquirer_brand_name}' vs '{target_brand_name}'")
+async def _corporate_culture_tool(brand_name: str) -> Dict[str, Any]:
+    """Researches the corporate culture, values, leadership, and workplace environment of a brand."""
+    logger.info(f"AGENT TOOL: Corporate Culture search for brand: '{brand_name}'")
+    query = f"corporate culture, values, leadership, and workplace environment for {brand_name}"
+    search_result = await web_search(query)
+    summary = await _summarize_with_gemini(search_result['context_str'], query)
+    return {"context_str": summary, "sources": search_result["sources"]}
+
+async def _financial_and_market_tool(brand_name: str) -> Dict[str, Any]:
+    """Researches the financial profile, market position, and recent financial news of a brand."""
+    logger.info(f"AGENT TOOL: Financial/Market search for brand: '{brand_name}'")
+    query = f"financial profile, market position, revenue, and recent financial news for {brand_name}"
+    search_result = await web_search(query)
+    summary = await _summarize_with_gemini(search_result['context_str'], query)
+    return {"context_str": summary, "sources": search_result["sources"]}
+
+
+async def intelligent_cultural_analysis_tool(acquirer_brand_name: str, target_brand_name: str) -> Dict[str, Any]:
+    """
+    Performs a deep, intelligent cultural comparison by finding representative cultural products (proxies) for each brand,
+    aggregating their audience tastes from Qloo, and then performing a comparative analysis.
+    """
+    logger.info(f"AGENT TOOL: INTELLIGENT Cultural Analysis for '{acquirer_brand_name}' vs '{target_brand_name}'")
+
+    # 1. Get profiles to find proxies
+    acquirer_profile_result = await _web_search_tool(f"What are the most famous and representative movies, characters, products, or public figures of the company or brand '{acquirer_brand_name}'?")
+    target_profile_result = await _web_search_tool(f"What are the most famous and representative movies, shows, or public figures from the company or brand '{target_brand_name}'?")
+    
+    # 2. Extract proxies
+    acquirer_proxies = await _extract_cultural_proxies(acquirer_profile_result['context_str'], acquirer_brand_name)
+    target_proxies = await _extract_cultural_proxies(target_profile_result['context_str'], target_brand_name)
+
+    # CORE FIX: Create a hybrid search list. Always include the original brand name as a fallback.
+    acquirer_search_terms = list(set([acquirer_brand_name] + acquirer_proxies))
+    target_search_terms = list(set([target_brand_name] + target_proxies))
+    
+    logger.info(f"Acquirer search terms for Qloo: {acquirer_search_terms}")
+    logger.info(f"Target search terms for Qloo: {target_search_terms}")
+
+    # --- THE FIX: Execute all Qloo API calls concurrently ---
     async with httpx.AsyncClient(timeout=45.0) as client:
-        acquirer_info = await _find_qloo_id(client, acquirer_brand_name)
-        target_info = await _find_qloo_id(client, target_brand_name)
-        if not acquirer_info: return {"context_str": f"Error: Could not find acquirer '{acquirer_brand_name}' in Qloo database."}
-        if not target_info: return {"context_str": f"Error: Could not find target '{target_brand_name}' in Qloo database."}
-        acquirer_tastes = await _get_qloo_tastes(client, acquirer_info[0])
-        target_tastes = await _get_qloo_tastes(client, target_info[0])
-    
-    if not acquirer_tastes or not target_tastes: 
-        return {"context_str": "Error: Could not retrieve taste data.", "qloo_analysis": {}, "culture_clashes": [], "untapped_growths": []}
+        # Create a list of tasks for all acquirer terms
+        acquirer_tasks = [_get_tastes_for_term(client, term) for term in acquirer_search_terms]
+        # Create a list of tasks for all target terms
+        target_tasks = [_get_tastes_for_term(client, term) for term in target_search_terms]
 
-    acquirer_set = {t['name'] for t in acquirer_tastes if t.get('name')}
-    target_set = {t['name'] for t in target_tastes if t.get('name')}
-    
-    # Calculate overlaps and differences
-    shared_tastes = list(acquirer_set.intersection(target_set))
-    union_size = len(acquirer_set.union(target_set))
-    acquirer_unique = list(acquirer_set - target_set)
-    target_unique = list(target_set - acquirer_set)
+        # Run all tasks in parallel
+        logger.info(f"Running {len(acquirer_tasks) + len(target_tasks)} Qloo API calls concurrently...")
+        acquirer_results, target_results = await asyncio.gather(
+            asyncio.gather(*acquirer_tasks),
+            asyncio.gather(*target_tasks)
+        )
+        logger.success("All Qloo API calls completed.")
 
-    # Pre-generate the lists for the final report
-    culture_clashes = [
-        {"topic": topic, "description": f"Acquirer's audience shows affinity for this, a taste not shared by the Target's audience.", "severity": "MEDIUM"}
-        for topic in acquirer_unique[:5]
-    ] + [
-        {"topic": topic, "description": f"Target's audience shows strong affinity for this, a taste not shared by the Acquirer's audience.", "severity": "HIGH"}
-        for topic in target_unique[:5]
-    ]
-    
-    untapped_growths = [
-        {"description": f"Both audiences show a strong affinity for '{topic}'. This shared passion point could be a key pillar for joint marketing campaigns and product integrations.", "potential_impact_score": random.randint(7, 9)}
-        for topic in shared_tastes[:5]
-    ]
+    # Flatten the list of sets into a single set of tastes for each brand
+    aggregated_acquirer_tastes = set().union(*acquirer_results)
+    aggregated_target_tastes = set().union(*target_results)
 
-    # Structure the final output
-    result = {
-        "context_str": "Qloo analysis complete. Affinity scores, clashes, and growth opportunities have been calculated.",
-        "qloo_analysis": {
+    if not aggregated_acquirer_tastes or not aggregated_target_tastes:
+        error_msg = "Error: Could not retrieve any taste data from Qloo for the brands or their cultural products."
+        return {"context_str": error_msg, "culture_clashes": [], "untapped_growths": []}
+    
+    # 4. Perform comparison on aggregated sets
+    shared_tastes = list(aggregated_acquirer_tastes.intersection(aggregated_target_tastes))
+    union_size = len(aggregated_acquirer_tastes.union(aggregated_target_tastes))
+    unique_to_acquirer = list(aggregated_acquirer_tastes - aggregated_target_tastes)
+    unique_to_target = list(aggregated_target_tastes - aggregated_target_tastes)
+
+    culture_clashes = []
+    for interest in unique_to_acquirer[:5]:
+        culture_clashes.append({"topic": interest, "description": "The acquirer's audience ecosystem shows a strong affinity for this, a taste not shared by the target's.", "severity": "MEDIUM"})
+    for interest in unique_to_target[:5]:
+        culture_clashes.append({"topic": interest, "description": "The target's audience ecosystem shows a strong affinity for this, a taste not shared by the acquirer's.", "severity": "HIGH"})
+        
+    untapped_growths = []
+    for interest in shared_tastes[:5]:
+        untapped_growths.append({"description": f"Both audience ecosystems show a strong affinity for '{interest}'. This shared passion could be a key pillar for joint marketing campaigns.", "potential_impact_score": 8})
+
+    # 5. Return the full analysis object
+    return {
+        "context_str": json.dumps({
             "affinity_overlap_score": round((len(shared_tastes) / union_size * 100), 2) if union_size > 0 else 0,
-            "shared_affinities_count": len(shared_tastes),
-            "acquirer_unique_tastes_count": len(acquirer_unique),
-            "target_unique_tastes_count": len(target_unique),
-        },
+            "shared_affinities_top_5": shared_tastes[:5],
+            "acquirer_unique_tastes_top_5": unique_to_acquirer[:5],
+            "target_unique_tastes_top_5": unique_to_target[:5],
+            "analysis_proxies": {"acquirer": acquirer_search_terms, "target": target_search_terms}
+        }),
         "culture_clashes": culture_clashes,
-        "untapped_growths": untapped_growths
+        "untapped_growths": untapped_growths,
+        "sources": acquirer_profile_result.get('sources', []) + target_profile_result.get('sources', [])
     }
-    return result
-
-async def _corporate_culture_research_tool(brand_name: str) -> Dict[str, Any]:
-    """
-    Performs targeted web searches to build a corporate culture and leadership profile.
-    It synthesizes findings on leadership, values, and employee sentiment.
-    """
-    logger.info(f"AGENT TOOL: Corporate Culture Research for: '{brand_name}'")
-    
-    queries = [
-        f"leadership team and bios for {brand_name}",
-        f"corporate values and mission statement of {brand_name}",
-        f"employee reviews and culture at {brand_name} (e.g., from Glassdoor, news articles)",
-    ]
-    
-    combined_context = ""
-    all_sources = []
-    
-    for query in queries:
-        search_result = await web_search(query)
-        if search_result and search_result['context_str']:
-            combined_context += f"\n\n--- Results for query: '{query}' ---\n{search_result['context_str']}"
-            all_sources.extend(search_result['sources'])
-
-    if not combined_context.strip():
-        return {"context_str": f"No significant corporate culture information could be found for '{brand_name}' via web search.", "sources": []}
-        
-    summary_query = f"Synthesize a corporate culture profile for {brand_name}. Focus on: 1. Leadership style and key executives. 2. Stated company values and mission. 3. Publicly perceived employee sentiment and work culture."
-    summary = await _summarize_with_gemini(combined_context, summary_query)
-
-    unique_sources = list({v['url']:v for v in all_sources}.values())
-    return {"context_str": summary, "sources": unique_sources}
-
-async def _financial_and_market_analysis_tool(brand_name: str) -> Dict[str, Any]:
-    """
-    Performs web searches to build a high-level financial and market profile.
-    Synthesizes findings on financial metrics, SWOT, and market position.
-    """
-    logger.info(f"AGENT TOOL: Financial & Market Analysis for: '{brand_name}'")
-    
-    queries = [
-        f"key financial metrics for {brand_name}",
-        f"SWOT analysis for {brand_name}",
-        f"{brand_name} market position and key competitors",
-    ]
-    
-    combined_context = ""
-    all_sources = []
-    
-    for query in queries:
-        search_result = await web_search(query)
-        if search_result and search_result['context_str']:
-            combined_context += f"\n\n--- Results for query: '{query}' ---\n{search_result['context_str']}"
-            all_sources.extend(search_result['sources'])
-
-    if not combined_context.strip():
-        return {"context_str": f"No significant financial or market information could be found for '{brand_name}' via web search.", "sources": []}
-        
-    summary_query = f"Synthesize a high-level financial and market profile for {brand_name}. Focus on: 1. Key financial health indicators (e.g., revenue, growth trends). 2. A brief SWOT analysis (Strengths, Weaknesses, Opportunities, Threats). 3. Its primary market position and main competitors."
-    summary = await _summarize_with_gemini(combined_context, summary_query)
-
-    unique_sources = list({v['url']:v for v in all_sources}.values())
-    return {"context_str": summary, "sources": unique_sources}
 
 # --- The Stateful ReAct Agent ---
 class AlloyReActAgent:
     PROMPT_TEMPLATE = """
-    You are a data-gathering AI assistant.
-
-    **PRIMARY DIRECTIVE:** Your only job is to execute a sequence of tool calls to gather all the necessary data for a comprehensive M&A due diligence report.
-
-    **RULES:**
-    1.  You MUST respond with a "Thought" and an "Action" in this exact format.
-    2.  Your "Action" MUST be a single, valid JSON object.
-    3.  The JSON object MUST have a `tool_name` key (the name of the tool to use).
-    4.  The JSON object MUST have a `parameters` key, which is an object of the tool's arguments.
-
-    **DATA-GATHERING TASKS (in any logical order):**
-    1.  **Company Profiles:** Get a general overview of each company's business.
-    2.  **Corporate Culture:** Investigate the internal culture, leadership, and values of each company.
-    3.  **Audience Affinity:** Analyze the cultural tastes of each company's audience. This tool also generates the `culture_clashes` and `untapped_growths` lists automatically.
-    4.  **Financial & Market Health:** Get a high-level overview of each company's market position and financial health.
+    You are a data-gathering AI assistant for a financial firm.
+    Your only job is to execute a sequence of tool calls to gather information about two companies and their cultural overlap.
+    Do not synthesize, analyze, or generate the final report yourself. Simply gather the data and pass it to the 'finish' tool.
 
     **TOOLS:**
-    - `web_search(query: str)`: Use for **Task 1**.
-    - `corporate_culture_research(brand_name: str)`: Use for **Task 2**.
-    - `qloo_comparative_analysis(acquirer_brand_name: str, target_brand_name: str)`: Use for **Task 3**.
-    - `financial_and_market_analysis_tool(brand_name: str)`: Use for **Task 4**.
-    - `finish(gathered_data: dict)`: Call this tool ONLY when all other data-gathering tasks are complete. The `gathered_data` object MUST contain these keys: `acquirer_profile`, `target_profile`, `acquirer_culture_profile`, `target_culture_profile`, `acquirer_financial_profile`, `target_financial_profile`, `qloo_analysis`, `culture_clashes`, `untapped_growths`.
+    - `web_search(query: str)`: For general company profile research.
+    - `corporate_culture_tool(brand_name: str)`: To get specific information on a company's culture, values, and leadership.
+    - `financial_and_market_tool(brand_name: str)`: To get specific information on a company's financial health and market position.
+    - `intelligent_cultural_analysis_tool(acquirer_brand_name: str, target_brand_name: str)`: For deep cultural analysis, finding clashes, and growth opportunities. THIS IS THE PRIMARY TOOL FOR CULTURAL DATA.
+    - `finish(gathered_data: dict)`: Use this ONLY when all data gathering steps are complete. The `gathered_data` parameter must be a JSON object containing keys for acquirer/target profiles, culture profiles, financial profiles, and the qloo analysis.
 
-    **EXAMPLE ACTION FORMAT:**
+    **RESPONSE FORMAT (JSON ONLY):**
+    You MUST respond with a single JSON object containing a "thought" and an "action".
+    The "action" MUST be an object with "tool_name" and "parameters".
+    
+    Example:
     ```json
-    {
-      "tool_name": "web_search",
-      "parameters": {
-        "query": "Example Inc. company profile"
-      }
-    }
+    {{
+      "thought": "I need to get the general company profile for the acquirer.",
+      "action": {{
+        "tool_name": "web_search",
+        "parameters": {{
+          "query": "{acquirer_brand} company profile"
+        }}
+      }}
+    }}
     ```
 
     **CURRENT TASK:**
@@ -1437,8 +1566,11 @@ class AlloyReActAgent:
 
     **COMPLETED STEPS:**
     {completed_steps}
+    
+    **PREVIOUS ACTIONS LOG:**
+    {scratchpad}
 
-    Based on the completed steps, what is the next logical data-gathering action?
+    Based on the completed steps and previous actions, what is the next logical data-gathering action? Return ONLY the JSON object.
     """
 
     def __init__(self, acquirer_brand: str, target_brand: str, user_context: str | None = None):
@@ -1451,126 +1583,131 @@ class AlloyReActAgent:
         self.gathered_data = {} 
         self.final_data = None
         self.tools = {
-            "web_search": _web_search_tool, 
-            "qloo_comparative_analysis": _qloo_comparative_analysis_tool,
-            "corporate_culture_research": _corporate_culture_research_tool,
-            "financial_and_market_analysis_tool": _financial_and_market_analysis_tool
+            "web_search": _web_search_tool,
+            "intelligent_cultural_analysis_tool": intelligent_cultural_analysis_tool,
+            "corporate_culture_tool": _corporate_culture_tool,
+            "financial_and_market_tool": _financial_and_market_tool
         }
         self.all_sources: Dict[str, List[Dict[str, str]]] = {
-            'acquirer_sources': [], 'target_sources': [], 
+            'acquirer_sources': [], 'target_sources': [], 'search_sources': [],
             'acquirer_culture_sources': [], 'target_culture_sources': [],
-            'acquirer_financial_sources': [], 'target_financial_sources': [],
-            'search_sources': []
+            'acquirer_financial_sources': [], 'target_financial_sources': []
         }
 
     def _build_prompt(self) -> str:
         """Builds the prompt with the current state of completed steps."""
         completed_steps_str = "\n".join(f"- {step}" for step in sorted(list(self.completed_steps))) or "None"
+        # Truncate scratchpad to keep the prompt within reasonable size limits
+        scratchpad_log = "\n".join(self.scratchpad.splitlines()[-10:])
         return self.PROMPT_TEMPLATE.format(
             acquirer_brand=self.acquirer_brand,
             target_brand=self.target_brand,
             user_context=self.user_context,
-            completed_steps=completed_steps_str
-        ) + self.scratchpad
+            completed_steps=completed_steps_str,
+            scratchpad=scratchpad_log
+        )
 
     async def run_stream(self) -> AsyncGenerator[Dict[str, Any], None]:
-        max_turns = 8
+        max_turns = 10 
         for i in range(max_turns):
             yield {"status": "thinking", "message": f"Agent reasoning (Step {i+1}/{max_turns})"}
             
             prompt = self._build_prompt()
             response_text = await self._get_llm_response(prompt)
             
-            if "**Action**:" not in response_text:
-                yield {"status": "thought", "message": response_text.replace("**Thought**:", "").strip()}
-                logger.warning("Agent produced a thought but no action. Ending turn.")
-                observation = "Error: Your response did not include an 'Action' block. You must provide an action."
-                self.scratchpad += f"\n**Thought**: {response_text.replace('**Thought**:', '').strip()}\n**Observation**: {observation}"
-                continue
-
-            parts = response_text.split("**Action**:", 1)
-            thought = parts[0].replace("**Thought**:", "").strip()
-            action_str = parts[1].strip().replace("```json", "").replace("```", "")
-            yield {"status": "thought", "message": thought}
-            
             try:
-                action_json = json.loads(action_str)
+                # Parse the entire response as a JSON object
+                response_json = json.loads(response_text)
+                thought = response_json.get("thought", "No thought provided.")
+                action_json = response_json.get("action", {})
+                yield {"status": "thought", "message": thought}
                 yield {"status": "action", "payload": action_json}
-            except json.JSONDecodeError as e:
-                logger.error(f"JSON parsing error: {e}. Raw action: {action_str}")
-                yield {"status": "error", "message": f"Agent provided invalid JSON: {e}"}
-                observation = f"Error: The Action was not valid JSON. You must provide a single, correctly formatted JSON object. For example: {{\"tool_name\": \"web_search\", \"parameters\": {{\"query\": \"some query\"}}}}"
-                self.scratchpad += f"\n**Thought**: {thought}\n**Action**: {action_str}\n**Observation**: {observation}"
+            except (json.JSONDecodeError, AttributeError) as e:
+                logger.error(f"Agent response was not valid JSON: {e}. Raw response: {response_text}")
+                yield {"status": "error", "message": f"Agent produced an invalid response: {e}"}
+                observation = f"Error: The previous response was not a valid JSON object with 'thought' and 'action' keys. Please correct the format. The error was: {e}"
+                self.scratchpad += f"\n**Observation**: {observation}"
                 continue
 
-            tool_name = action_json.get("tool_name")
-            params = action_json.get("parameters", {})
+            tool_name, params = action_json.get("tool_name"), action_json.get("parameters", {})
             
             if not tool_name:
                 observation = "Error: Your action JSON is missing the 'tool_name' key."
             elif tool_name == "finish":
+                required_keys = ['acquirer_profile', 'target_profile', 'qloo_analysis', 'acquirer_culture_profile', 'target_culture_profile', 'acquirer_financial_profile', 'target_financial_profile']
+                for key in required_keys:
+                    if key not in self.gathered_data:
+                        self.gathered_data[key] = f"Data for '{key}' was not gathered."
+                
                 self.final_data = params.get("gathered_data", self.gathered_data)
                 yield {"status": "complete"}
                 return
             elif tool_name not in self.tools:
-                observation = f"Error: Unknown tool '{tool_name}'. Please use one of the available tools."
+                observation = f"Error: Unknown tool '{tool_name}'."
             else:
                 try:
                     tool_result = await self.tools[tool_name](**params)
                     observation = tool_result.get('context_str', f"Tool {tool_name} ran but provided no context.")
+                    sources = tool_result.get('sources', [])
                     
+                    search_string = " ".join(str(v) for v in params.values()).lower()
+                    is_acquirer = self.acquirer_brand.lower() in search_string
+                    is_target = self.target_brand.lower() in search_string
+                    
+                    # More robust check
+                    if 'brand_name' in params and params['brand_name'] == self.acquirer_brand: is_acquirer = True
+                    if 'brand_name' in params and params['brand_name'] == self.target_brand: is_target = True
+
                     if tool_name == "web_search":
-                        query = params.get('query','').lower()
-                        if self.acquirer_brand.lower() in query:
-                            self.completed_steps.add("searched_acquirer")
+                        if is_acquirer and not is_target:
+                            self.completed_steps.add("searched_acquirer_profile")
                             self.gathered_data['acquirer_profile'] = observation
-                            self.all_sources['acquirer_sources'].extend(tool_result.get('sources', []))
-                        elif self.target_brand.lower() in query:
-                            self.completed_steps.add("searched_target")
+                            self.all_sources['acquirer_sources'].extend(sources)
+                        elif is_target and not is_acquirer:
+                            self.completed_steps.add("searched_target_profile")
                             self.gathered_data['target_profile'] = observation
-                            self.all_sources['target_sources'].extend(tool_result.get('sources', []))
+                            self.all_sources['target_sources'].extend(sources)
                         
-                        for source in tool_result.get('sources', []):
-                            yield {"status": "source", "payload": source}
-
-                    elif tool_name == "corporate_culture_research":
-                        brand = params.get('brand_name', '').lower()
-                        if self.acquirer_brand.lower() in brand:
-                            self.completed_steps.add("researched_acquirer_culture")
+                    elif tool_name == "corporate_culture_tool":
+                        if is_acquirer:
+                            self.completed_steps.add("searched_acquirer_culture")
                             self.gathered_data['acquirer_culture_profile'] = observation
-                            self.all_sources['acquirer_culture_sources'].extend(tool_result.get('sources', []))
-                        elif self.target_brand.lower() in brand:
-                            self.completed_steps.add("researched_target_culture")
+                            self.all_sources['acquirer_culture_sources'].extend(sources)
+                        elif is_target:
+                            self.completed_steps.add("searched_target_culture")
                             self.gathered_data['target_culture_profile'] = observation
-                            self.all_sources['target_culture_sources'].extend(tool_result.get('sources', []))
-                        for source in tool_result.get('sources', []): yield {"status": "source", "payload": source}
-
-                    elif tool_name == "financial_and_market_analysis_tool":
-                        brand = params.get('brand_name', '').lower()
-                        if self.acquirer_brand.lower() in brand:
-                            self.completed_steps.add("researched_acquirer_financials")
-                            self.gathered_data['acquirer_financial_profile'] = observation
-                            self.all_sources['acquirer_financial_sources'].extend(tool_result.get('sources', []))
-                        elif self.target_brand.lower() in brand:
-                            self.completed_steps.add("researched_target_financials")
-                            self.gathered_data['target_financial_profile'] = observation
-                            self.all_sources['target_financial_sources'].extend(tool_result.get('sources', []))
-                        for source in tool_result.get('sources', []): yield {"status": "source", "payload": source}
+                            self.all_sources['target_culture_sources'].extend(sources)
                     
-                    elif tool_name == "qloo_comparative_analysis":
-                        self.completed_steps.add("performed_qloo_analysis")
-                        self.gathered_data['qloo_analysis'] = tool_result.get('qloo_analysis', {})
-                        self.gathered_data['culture_clashes'] = tool_result.get('culture_clashes', [])
-                        self.gathered_data['untapped_growths'] = tool_result.get('untapped_growths', [])
+                    elif tool_name == "financial_and_market_tool":
+                        if is_acquirer:
+                            self.completed_steps.add("searched_acquirer_financial")
+                            self.gathered_data['acquirer_financial_profile'] = observation
+                            self.all_sources['acquirer_financial_sources'].extend(sources)
+                        elif is_target:
+                            self.completed_steps.add("searched_target_financial")
+                            self.gathered_data['target_financial_profile'] = observation
+                            self.all_sources['target_financial_sources'].extend(sources)
 
-                except TypeError as e:
-                    logger.error(f"Type error executing tool '{tool_name}': {e}", exc_info=True)
-                    observation = f"Error: Tool '{tool_name}' was called with incorrect or missing parameters. The error was: {e}. Please correct the 'parameters' object in your next action."
+                    elif tool_name == "intelligent_cultural_analysis_tool":
+                        self.completed_steps.add("performed_intelligent_qloo_analysis")
+                        self.all_sources['search_sources'].extend(sources) # Add sources from proxy search
+                        try:
+                            self.gathered_data['qloo_analysis'] = json.loads(observation)
+                            self.gathered_data['culture_clashes'] = tool_result.get('culture_clashes', [])
+                            self.gathered_data['untapped_growths'] = tool_result.get('untapped_growths', [])
+                        except (json.JSONDecodeError, TypeError):
+                            self.gathered_data['qloo_analysis'] = {"error": observation}
+                            self.gathered_data['culture_clashes'] = []
+                            self.gathered_data['untapped_growths'] = []
+
+                    for source in sources:
+                        yield {"status": "source", "payload": source}
+
                 except Exception as e:
                     logger.error(f"Error executing tool '{tool_name}': {e}", exc_info=True)
                     observation = f"Error: {e}"
 
-            self.scratchpad += f"\n**Thought**: {thought}\n**Action**: {json.dumps(action_json)}\n**Observation**: {observation}"
+            self.scratchpad += f"\nAction: {json.dumps(action_json)}\nObservation: {observation}"
             yield {"status": "observation", "message": f"Observation from {tool_name}"}
 
         logger.warning("Agent exceeded maximum turns.")
@@ -1579,11 +1716,21 @@ class AlloyReActAgent:
 
     async def _get_llm_response(self, prompt) -> str:
         try:
-            response = await self.model.generate_content_async(prompt)
+            # Enforce JSON output from the model
+            generation_config = {"response_mime_type": "application/json"}
+            response = await self.model.generate_content_async(prompt, generation_config=generation_config)
             return response.text
         except Exception as e:
             logger.error(f"Gemini API call failed: {e}")
-            return f'**Thought**: A critical error occurred. I must finish now.\n**Action**: {json.dumps({"tool_name": "finish", "parameters": {"gathered_data": self.gathered_data}})}'-e 
+            # Fallback to a finish action if the LLM fails
+            finish_action = {
+                "thought": "A critical error occurred with the LLM. I must finish now.",
+                "action": {
+                    "tool_name": "finish",
+                    "parameters": {"gathered_data": self.gathered_data}
+                }
+            }
+            return json.dumps(finish_action)-e 
 -e
 
 File: backend/src/services/docling.py
@@ -2028,7 +2175,7 @@ async def find_official_website(brand_name: str) -> Optional[str]:
         You are a research assistant. Your only task is to find the official homepage URL for a given company.
         Return ONLY the URL and nothing else. Do not add any explanatory text, markdown, or greetings.
         If you cannot find a definitive official website, return the text "NOT_FOUND".
-
+    
         Company Name: "{brand_name}"
         Official URL:
         """
@@ -2066,9 +2213,334 @@ async def find_official_website(brand_name: str) -> Optional[str]:
         return None-e 
 -e
 
+File: backend/tests/conftest.py
+import pytest_asyncio
+import asyncio
+from typing import AsyncGenerator, Generator
+from httpx import AsyncClient, ASGITransport
+from sqlmodel import SQLModel
+from sqlalchemy.ext.asyncio import AsyncSession
+
+# Set the environment variable to 'test' BEFORE importing the app
+import os
+os.environ['ENVIRONMENT'] = 'test'
+
+from src.main import app
+from src.db.postgresql import postgres_db
+from src.db import models
+from src.core.security import get_password_hash, create_access_token
+
+# --- Core Fixtures ---
+@pytest_asyncio.fixture(scope="session")
+def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
+    """Create an instance of the default event loop for each test session."""
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    yield loop
+    loop.close()
+
+@pytest_asyncio.fixture(scope="function")
+async def db_session() -> AsyncGenerator[asyncio.AbstractEventLoop, None]:
+    """
+    Fixture to provide a database session for a test.
+    This will create all tables before the test and drop them after,
+    ensuring a clean slate for each test function.
+    """
+    # Establish connection and create tables
+    async with postgres_db.engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.drop_all) # Drop first to be safe
+        await conn.run_sync(SQLModel.metadata.create_all)
+
+    # Yield the session to the test
+    async with postgres_db.get_session() as session:
+        yield session
+
+    # After the test, drop all tables to ensure isolation
+    async with postgres_db.engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.drop_all)
+    
+    # Dispose the engine to close all connections
+    await postgres_db.engine.dispose()
+
+
+@pytest_asyncio.fixture(scope="function")
+async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
+    """
+    Fixture to provide an HTTPX client for making requests to the test app.
+    It depends on db_session to ensure the database is ready.
+    """
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+# --- Test User and Authentication Fixtures ---
+
+@pytest_asyncio.fixture(scope="function")
+async def test_user(db_session: AsyncSession) -> models.User:
+    """Fixture to create a standard test user in the database."""
+    user = models.User(
+        email="test@example.com",
+        full_name="Test User",
+        hashed_password=get_password_hash("testpassword"),
+        is_active=True,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+    return user
+
+@pytest_asyncio.fixture(scope="function")
+def test_user_token(test_user: models.User) -> str:
+    """Fixture to create a JWT token for the test user."""
+    return create_access_token(data={"sub": test_user.email})
+
+@pytest_asyncio.fixture(scope="function")
+async def authorized_client(client: AsyncClient, test_user_token: str) -> AsyncClient:
+    """Fixture to provide an authenticated client."""
+    client.headers["Authorization"] = f"Bearer {test_user_token}"
+    return client-e 
+-e
+
+File: backend/tests/core/test_security.py
+from src.core.security import verify_password, get_password_hash, create_access_token, decode_token
+
+def test_password_hashing():
+    password = "plain_password"
+    hashed_password = get_password_hash(password)
+    assert hashed_password != password
+    assert verify_password(password, hashed_password)
+    assert not verify_password("wrong_password", hashed_password)
+
+def test_jwt_token_creation_and_decoding():
+    data = {"sub": "test@example.com", "extra_data": "something"}
+    token = create_access_token(data)
+    decoded_data = decode_token(token)
+    assert decoded_data is not None
+    assert decoded_data["sub"] == data["sub"]
+    assert decoded_data["extra_data"] == data["extra_data"]
+    assert "exp" in decoded_data
+
+def test_decode_invalid_token():
+    invalid_token = "this.is.not.a.valid.token"
+    decoded_data = decode_token(invalid_token)
+    assert decoded_data is None-e 
+-e
+
+File: backend/tests/core/__init__.py
+-e 
+-e
+
+File: backend/tests/__init__.py
+-e 
+-e
+
+File: backend/tests/api/v1/test_auth.py
+import pytest
+from httpx import AsyncClient
+from fastapi import status
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
+
+from src.db import models
+
+@pytest.mark.asyncio
+async def test_register_user(client: AsyncClient, db_session: AsyncSession):
+    # Successful registration
+    response = await client.post("/api/v1/auth/register", json={"email": "newuser@example.com", "password": "password123"})
+    assert response.status_code == status.HTTP_201_CREATED
+    assert response.json() == {"message": "User created successfully"}
+
+    # Verify user is in the database
+    user = (await db_session.execute(select(models.User).where(models.User.email == "newuser@example.com"))).scalar_one_or_none()
+    assert user is not None
+    assert user.email == "newuser@example.com"
+
+    # Test duplicate email registration
+    response = await client.post("/api/v1/auth/register", json={"email": "newuser@example.com", "password": "password123"})
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert "Email already registered" in response.json()["detail"]
+
+@pytest.mark.asyncio
+async def test_login_for_access_token(client: AsyncClient, test_user: models.User):
+    # Test successful login
+    login_data = {"username": test_user.email, "password": "testpassword"}
+    response = await client.post("/api/v1/auth/login", data=login_data)
+    assert response.status_code == status.HTTP_200_OK
+    token_data = response.json()
+    assert "access_token" in token_data
+    assert "refresh_token" in token_data
+    assert token_data["token_type"] == "bearer"
+
+    # Test incorrect password
+    login_data["password"] = "wrongpassword"
+    response = await client.post("/api/v1/auth/login", data=login_data)
+    assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+@pytest.mark.asyncio
+async def test_guest_login(client: AsyncClient, db_session: AsyncSession):
+    response = await client.post("/api/v1/auth/guest")
+    assert response.status_code == status.HTTP_200_OK
+    token_data = response.json()
+    assert "access_token" in token_data
+    assert "refresh_token" in token_data
+
+    # Verify a guest user was created
+    users = (await db_session.execute(select(models.User).where(models.User.email.like("guest_%@alloy.dev")))).scalars().all()
+    assert len(users) > 0
+
+@pytest.mark.asyncio
+async def test_get_current_user_dependency(authorized_client: AsyncClient, test_user: models.User):
+    # This endpoint doesn't exist directly, but we can test a protected endpoint that uses it.
+    # Let's test the /reports/draft endpoint which is protected.
+    response = await authorized_client.post("/api/v1/reports/draft")
+    assert response.status_code == status.HTTP_201_CREATED
+    report_data = response.json()
+    assert report_data["user_id"] == test_user.id-e 
+-e
+
+File: backend/tests/api/v1/__init__.py
+-e 
+-e
+
+File: backend/tests/api/v1/test_reports.py
+import pytest
+from httpx import AsyncClient
+from fastapi import status
+from sqlalchemy.ext.asyncio import AsyncSession
+import json
+import uuid
+
+from src.db import models
+from src.db.postgresql import postgres_db
+
+@pytest.mark.asyncio
+async def test_create_and_get_reports(authorized_client: AsyncClient, test_user: models.User, db_session: AsyncSession):
+    # Create a draft report
+    response = await authorized_client.post("/api/v1/reports/draft")
+    assert response.status_code == status.HTTP_201_CREATED
+    draft_report_data = response.json()
+    assert draft_report_data["status"] == "DRAFT"
+    assert draft_report_data["user_id"] == test_user.id
+    # Check that the ID is a valid UUID string
+    assert uuid.UUID(draft_report_data["id"])
+
+    # Create a completed report manually for testing GET
+    completed_report = models.Report(
+        user_id=test_user.id,
+        title="Completed Test Report",
+        acquirer_brand="Acquirer",
+        target_brand="Target",
+        status=models.ReportStatus.COMPLETED
+    )
+    db_session.add(completed_report)
+    await db_session.commit()
+    await db_session.refresh(completed_report)
+
+    # Get all non-draft reports for the user
+    response = await authorized_client.get("/api/v1/reports/")
+    assert response.status_code == status.HTTP_200_OK
+    reports_list = response.json()
+    assert len(reports_list) == 1
+    assert reports_list[0]["id"] == str(completed_report.id)
+    assert reports_list[0]["title"] == "Completed Test Report"
+
+    # Get a specific report by ID
+    response = await authorized_client.get(f"/api/v1/reports/{completed_report.id}")
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["title"] == "Completed Test Report"
+
+@pytest.mark.asyncio
+async def test_delete_report(authorized_client: AsyncClient, test_user: models.User, db_session: AsyncSession):
+    report_to_delete = models.Report(user_id=test_user.id, status=models.ReportStatus.COMPLETED)
+    db_session.add(report_to_delete)
+    await db_session.commit()
+    await db_session.refresh(report_to_delete)
+    report_id = report_to_delete.id
+
+    # Delete the report
+    response = await authorized_client.delete(f"/api/v1/reports/{report_id}")
+    assert response.status_code == status.HTTP_204_NO_CONTENT
+
+    # Verify it's gone from the database using a new session to avoid cache issues
+    async with postgres_db.get_session() as session:
+        deleted_report = await session.get(models.Report, report_id)
+        assert deleted_report is None
+
+@pytest.mark.asyncio
+async def test_generate_report_stream_mocked(authorized_client: AsyncClient, test_user: models.User, db_session: AsyncSession, mocker):
+    # --- Mocks Setup ---
+    mock_agent_instance = mocker.MagicMock()
+    async def mock_run_stream():
+        yield {"status": "info", "message": "Agent started"}
+        yield {"status": "complete"}
+
+    mock_agent_instance.run_stream.return_value = mock_run_stream()
+    mock_agent_instance.final_data = {
+        "qloo_analysis": {"affinity_overlap_score": 55.5}, "culture_clashes": [], "untapped_growths": [],
+        "acquirer_culture_profile": "Mock culture", "target_culture_profile": "Mock culture",
+        "acquirer_financial_profile": "Mock finance", "target_financial_profile": "Mock finance"
+    }
+    mock_agent_instance.all_sources = {}
+    mocker.patch('src.api.v1.reports.AlloyReActAgent', return_value=mock_agent_instance)
+
+    mocker.patch('src.api.v1.reports.synthesize_final_report', return_value={
+        "cultural_compatibility_score": 88.0, "affinity_overlap_score": 55.5,
+        "strategic_summary": "Mocked summary.", "brand_archetype_summary": {},
+        "corporate_ethos_summary": {}, "financial_synthesis": "Mocked financial synthesis."
+    })
+    
+    # --- Test Execution ---
+    draft_report = models.Report(user_id=test_user.id, status=models.ReportStatus.DRAFT)
+    db_session.add(draft_report)
+    await db_session.commit()
+    await db_session.refresh(draft_report)
+    report_id_to_check = draft_report.id
+    
+    payload = {"acquirer_brand": "Test Acquirer", "target_brand": "Test Target", "title": "Mock Report"}
+    
+    events = []
+    async with authorized_client.stream("POST", f"/api/v1/reports/{report_id_to_check}/generate", json=payload, timeout=10) as response:
+        response.raise_for_status()
+        async for line in response.aiter_lines():
+            if line.startswith("data:"):
+                events.append(json.loads(line[6:]))
+
+    # --- Assertions ---
+    final_event = events[-1] if events else {}
+    assert final_event.get("status") == "complete", f"Stream did not complete successfully. Last event: {final_event}"
+    assert final_event.get("payload", {}).get("reportId") == str(report_id_to_check)
+
+    # Assert the database state was updated correctly using a fresh session
+    async with postgres_db.get_session() as session:
+        final_report = await session.get(models.Report, report_id_to_check)
+        assert final_report is not None
+        assert final_report.status == models.ReportStatus.COMPLETED
+        # To check analysis, we need to load the relationship
+        await session.refresh(final_report, attribute_names=["analysis"])
+        assert final_report.analysis is not None
+        assert final_report.analysis.cultural_compatibility_score == 88.0-e 
+-e
+
+File: backend/tests/api/v1/test_health.py
+import pytest
+from httpx import AsyncClient
+from fastapi import status
+
+@pytest.mark.asyncio
+async def test_health_check(client: AsyncClient):
+    response = await client.get("/api/v1/health/health")
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "version" in data-e 
+-e
+
+File: backend/tests/api/__init__.py
+-e 
+-e
+
 File: web/src/types/report.ts
 export interface Report {
-  id: number;
+  id: string; // Changed from number
   title: string;
   acquirer_brand: string;
   target_brand: string;
@@ -2087,7 +2559,7 @@ export interface ReportAnalysis {
   affinity_overlap_score: number;
   brand_archetype_summary: string | { acquirer_archetype?: string, target_archetype?: string }; 
   strategic_summary: string;
-  report_id: number;
+  report_id: string; // Changed from number
   search_sources?: Array<{ title: string; url: string }>;
   acquirer_sources?: Array<{ title: string; url: string }>;
   target_sources?: Array<{ title: string; url: string }>;
@@ -2114,14 +2586,14 @@ export interface CultureClash {
   topic: string;
   description: string;
   severity: ClashSeverity;
-  report_id: number;
+  report_id: string; // Changed from number
 }
 
 export interface UntappedGrowth {
   id: number;
   description: string;
   potential_impact_score: number;
-  report_id: number;
+  report_id: string; // Changed from number
 }-e 
 -e
 
@@ -2564,7 +3036,8 @@ export default function SupportPage() {
     }
     setIsLoading(true);
 
-    const promise = fetch(`${process.env.NEXT_PUBLIC_API_URL}/support/ticket`, {
+    // This endpoint doesn't exist, but we use the relative path pattern for consistency.
+    const promise = fetch(`/api/v1/utils/support/ticket`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -2573,6 +3046,8 @@ export default function SupportPage() {
         body: JSON.stringify({ category, subject, message }),
     }).then(res => {
         if (!res.ok) {
+            // Mocking a successful response for the demo
+            if(res.status === 404) return {message: 'Ticket submitted successfully! (Demo)'};
             throw new Error('Failed to submit ticket. Please try again later.');
         }
         return res.json();
@@ -2751,18 +3226,18 @@ const fetcher = (url: string, token: string) =>
 export default function ReportPage() {
     const { id } = useParams<{ id: string }>();
     const { accessToken } = useAuth();
-    const API_URL = process.env.NEXT_PUBLIC_API_URL;
     const { data: report, error, isLoading } = useSWR(
-        accessToken ? [`${API_URL}/reports/${id}`, accessToken] : null,
+        accessToken ? [`/api/v1/reports/${id}`, accessToken] : null,
         ([url, token]) => fetcher(url, token)
     );
+    console.log(report);
     const [isDownloading, setIsDownloading] = useState(false);
 
     const handleDownload = async () => {
         if (!report || !accessToken) return;
         setIsDownloading(true);
         try {
-            const res = await fetch(`${API_URL}/reports/${report.id}/download-pdf`, {
+            const res = await fetch(`/api/v1/reports/${report.id}/download-pdf`, {
                 headers: { 'Authorization': `Bearer ${accessToken}` }
             });
             if (!res.ok) {
@@ -2864,7 +3339,7 @@ const fetcher = (url: string, token: string): Promise<Report[]> =>
     return res.json();
   });
 
-async function deleteReport(url: string, { arg }: { arg: { reportId: number, token: string } }) {
+async function deleteReport(url: string, { arg }: { arg: { reportId: string, token: string } }) {
     const response = await fetch(`${url}${arg.reportId}`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${arg.token}` }
@@ -2897,14 +3372,13 @@ const StatusBadge = ({ status }: { status: Report['status'] }) => {
 // --- Main Reports Page Component ---
 export default function ReportsPage() {
     const { accessToken } = useAuth();
-    const API_URL = process.env.NEXT_PUBLIC_API_URL;
     const { data: reports, error, mutate, isLoading } = useSWR(
-        accessToken ? [`${API_URL}/reports/`, accessToken] : null,
+        accessToken ? [`/api/v1/reports/`, accessToken] : null,
         ([url, token]) => fetcher(url, token)
     );
-    const { trigger: triggerDelete } = useSWRMutation(`${API_URL}/reports/`, deleteReport);
+    const { trigger: triggerDelete } = useSWRMutation(`/api/v1/reports/`, deleteReport);
 
-    const handleDelete = async (reportId: number) => {
+    const handleDelete = async (reportId: string) => {
         toast.info("Deleting report...");
         try {
             await triggerDelete({ reportId, token: accessToken! });
@@ -3090,7 +3564,7 @@ export default function RegisterPage() {
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const { login } = useAuth();
+  const { login, apiUrl } = useAuth();
   const router = useRouter();
 
   const handleRegister = async (e: FormEvent) => {
@@ -3108,7 +3582,7 @@ export default function RegisterPage() {
 
     try {
       // 1. Register the user
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/register`, {
+      const res = await fetch(`/api/v1/auth/register`, {
         method: 'POST',
         body: JSON.stringify({ email, password, full_name: "" }),
         headers: { 'Content-Type': 'application/json' }
@@ -3121,7 +3595,7 @@ export default function RegisterPage() {
       }
       
       // 2. Log the user in to get tokens
-      const loginRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/login`, {
+      const loginRes = await fetch(`/api/v1/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: formData.toString(),
@@ -3139,7 +3613,9 @@ export default function RegisterPage() {
       setError(err instanceof Error ? err.message : "An unexpected error occurred. Please try again.");
     }
   };
-  const googleAuthUrl = `${process.env.NEXT_PUBLIC_API_URL}/auth/google/authorize`;
+  
+  // The Google Auth URL MUST be absolute and include the /api/v1 prefix.
+  const googleAuthUrl = `${apiUrl}/api/v1/auth/google/authorize`;
 
   return (
     <Card className="w-full max-w-sm">
@@ -3298,7 +3774,7 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [isGuestLoading, setIsGuestLoading] = useState(false);
-  const { login } = useAuth();
+  const { login, apiUrl } = useAuth(); // Get apiUrl from context
   const router = useRouter();
   const searchParams = useSearchParams();
   const isLoading = isLoggingIn || isGuestLoading;
@@ -3313,7 +3789,8 @@ export default function LoginPage() {
     formData.append('password', password);
 
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/login`, {
+      // Use relative path for fetch, it will be handled by the rewrite proxy
+      const res = await fetch(`/api/v1/auth/login`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
@@ -3342,7 +3819,8 @@ export default function LoginPage() {
     setError(null);
     setIsGuestLoading(true);
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/guest`, {
+       // Use relative path for fetch
+      const res = await fetch(`/api/v1/auth/guest`, {
         method: 'POST',
       });
 
@@ -3362,8 +3840,8 @@ export default function LoginPage() {
     }
   };
 
-  // Google login is now a simple link to our backend
-  const googleAuthUrl = `${process.env.NEXT_PUBLIC_API_URL}/auth/google/authorize`;
+  // The Google Auth URL MUST be absolute and include the /api/v1 prefix.
+  const googleAuthUrl = `${apiUrl}/api/v1/auth/google/authorize`;
 
   return (
     <Card className="w-full max-w-sm">
@@ -3458,12 +3936,22 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // This is a Server Component, so it can safely access process.env at runtime.
+  // We use the same variable name for consistency.
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+
+  if (!apiUrl) {
+    // This will cause an error page in production if the env var is missing,
+    // which is better than a broken app.
+    throw new Error("FATAL: NEXT_PUBLIC_API_URL environment variable is not set.");
+  }
+
   return (
     <html lang="en">
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <AppProviders>{children}</AppProviders>
+        <AppProviders apiUrl={apiUrl}>{children}</AppProviders>
       <Toaster richColors position="bottom-right" />
       </body>
     </html>
@@ -6895,7 +7383,6 @@ interface AIAnalystChatProps {
 
 export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
   const { accessToken } = useAuth();
-  const API_URL = process.env.NEXT_PUBLIC_API_URL;
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -6931,7 +7418,7 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
         Untapped Growth: ${report.untapped_growths.map(g => `- ${g.description} (Impact: ${g.potential_impact_score})`).join('\n')}
       `;
 
-      const res = await fetch(`${API_URL}/reports/${report.id}/chat`, {
+      const res = await fetch(`/api/v1/reports/${report.id}/chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -7097,8 +7584,7 @@ const useParsedReport = (report: Report) => {
 };
 
 const CompanyLogo = ({ brandName }: { brandName: string }) => {
-    const API_URL = process.env.NEXT_PUBLIC_API_URL;
-    const faviconUrl = `${API_URL}/utils/favicon?brandName=${encodeURIComponent(brandName)}`;
+    const faviconUrl = `/api/v1/utils/favicon?brandName=${encodeURIComponent(brandName)}`;
     return (
         <div className="flex items-center gap-3">
             <Image src={faviconUrl} alt={`${brandName} logo`} width={40} height={40} className="rounded-lg border bg-background p-1" unoptimized priority={false}/>
@@ -7118,10 +7604,9 @@ const SeverityBadge = ({ severity }: { severity: ClashSeverity }) => {
 };
 
 const SourcePill = ({ url }: { url: string }) => {
-    const API_URL = process.env.NEXT_PUBLIC_API_URL;
     try {
         const domain = new URL(url).hostname?.replace('www.', '');
-        const faviconUrl = `${API_URL}/utils/favicon?url=${encodeURIComponent(url)}`;
+        const faviconUrl = `/api/v1/utils/favicon?url=${encodeURIComponent(url)}`;
         return (
             <Link href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-full border bg-secondary/50 px-3 py-1 text-sm text-secondary-foreground transition-colors hover:bg-secondary">
                 <Image src={faviconUrl} alt={`${domain} favicon`} width={16} height={16} className="rounded-full" unoptimized/>
@@ -7140,7 +7625,9 @@ const ReportHeader = ({ report, children }: { report: Report, children?: React.R
     <div className="space-y-4">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
             <CompanyLogo brandName={report.acquirer_brand} />
-            <Zap className="h-8 w-8 text-muted-foreground flex-shrink-0" />
+            <span className="h-8 w-8 text-muted-foreground flex-shrink-0">
+                ACQUIRING
+            </span>
             <CompanyLogo brandName={report.target_brand} />
         </div>
         <Card>
@@ -8214,7 +8701,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../ui/collapsible";
 
-// API MUTATIONs
+// API MUTATION
 const createDraftReport = async (url: string, { arg }: { arg: { token: string }}) => {
     const res = await fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${arg.token}` } });
     if (!res.ok) throw new Error('Failed to create draft session.');
@@ -8223,7 +8710,7 @@ const createDraftReport = async (url: string, { arg }: { arg: { token: string }}
 
 // TYPES
 interface Step {
-  id: string; // Should be unique
+  id: string;
   status: 'info' | 'search' | 'source' | 'analysis' | 'reasoning' | 'synthesis' | 'saving' | 'complete' | 'error';
   message?: string;
   payload?: any;
@@ -8254,7 +8741,8 @@ TooltipContent.displayName = TooltipPrimitive.Content.displayName;
 
 const SourceItem = ({ source }: { source: { url: string, title?: string }}) => {
     const domain = new URL(source.url).hostname?.replace('www.', '');
-    const faviconUrl = `${process.env.NEXT_PUBLIC_API_URL}/utils/favicon?url=${encodeURIComponent(source.url)}`;
+    const { apiUrl } = useAuth();
+    const faviconUrl = `${apiUrl}/api/v1/utils/favicon?url=${encodeURIComponent(source.url)}`;
     return (
         <Link href={source.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 group">
             <Image src={faviconUrl} alt="source favicon" width={16} height={16} className="rounded-full" unoptimized/>
@@ -8264,13 +8752,14 @@ const SourceItem = ({ source }: { source: { url: string, title?: string }}) => {
 };
 
 const FaviconPreview = ({ url }: { url: string }) => {
-    const faviconUrl = `${process.env.NEXT_PUBLIC_API_URL}/utils/favicon?url=${encodeURIComponent(url)}`;
+    const { apiUrl } = useAuth();
+    const faviconUrl = `${apiUrl}/api/v1/utils/favicon?url=${encodeURIComponent(url)}`;
     return <Image src={faviconUrl} alt="favicon" width={16} height={16} className="rounded-full" unoptimized/>;
 }
 
 const StepItem = ({ step }: { step: Step }) => {
     const ICONS = {
-        info: <Bot className="h-4 w-4 text-foreground" />,
+        info: <Bot className="h-4 w-4 text-primary" />,
         search: <Search className="h-4 w-4 text-blue-500" />,
         source: <LinkIcon className="h-4 w-4 text-muted-foreground" />,
         analysis: <Microscope className="h-4 w-4 text-purple-500" />,
@@ -8283,7 +8772,7 @@ const StepItem = ({ step }: { step: Step }) => {
 
     const renderContent = () => {
         if (step.status === 'source' && step.payload) {
-            return <SourceItem source={{ url: step.payload.url, title: step.payload.title }} />;
+            return <SourceItem source={step.payload} />;
         }
         return step.message;
     };
@@ -8302,8 +8791,8 @@ const StepItem = ({ step }: { step: Step }) => {
 // --- MAIN COMPONENT ---
 export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxProps>(
   ({ onReportCreated, onPristineChange, className }, ref) => {
-    const { accessToken } = useAuth();
-    const API_URL = process.env.NEXT_PUBLIC_API_URL;
+    const { accessToken, apiUrl } = useAuth();
+    const API_URL = apiUrl;
 
     const [draftReportId, setDraftReportId] = useState<number | null>(null);
     const [acquirer, setAcquirer] = useState("");
@@ -8320,7 +8809,7 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
     const fileInputRef = useRef<HTMLInputElement>(null);
     const scrollAreaRef = useRef<HTMLDivElement>(null);
 
-    const { trigger: triggerDraft, isMutating: isCreatingDraft } = useSWRMutation(`${API_URL}/reports/draft`, createDraftReport);
+    const { trigger: triggerDraft, isMutating: isCreatingDraft } = useSWRMutation(`${API_URL}/api/v1/reports/draft`, createDraftReport);
     const isLoading = isCreatingDraft || isGenerating || uploadedFile?.status === 'uploading';
 
     useEffect(() => {
@@ -8342,7 +8831,7 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
         const formData = new FormData();
         formData.append('file', file);
         try {
-            const res = await fetch(`${API_URL}/reports/${draftReportId}/upload_context_file`, { method: 'POST', headers: { 'Authorization': `Bearer ${accessToken!}` }, body: formData });
+            const res = await fetch(`${API_URL}/api/v1/reports/${draftReportId}/upload_context_file`, { method: 'POST', headers: { 'Authorization': `Bearer ${accessToken!}` }, body: formData });
             if (!res.ok) { const errorData = await res.json(); throw new Error(errorData.detail || 'File upload failed'); }
             setUploadedFile({ id: fileId, name: file.name, status: 'success', message: 'Context uploaded' });
             toast.success("Context file uploaded successfully.");
@@ -8360,7 +8849,7 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
         setIsGenerating(true); setLogSteps([]); setSources([]); setIsCollapsibleOpen(true);
         
         try {
-            const response = await fetch(`${API_URL}/reports/${draftReportId}/generate`, {
+            const response = await fetch(`${API_URL}/api/v1/reports/${draftReportId}/generate`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken!}` },
                 body: JSON.stringify({ acquirer_brand: acquirer, target_brand: target, title: `${acquirer} vs. ${target}`, context: notes, use_grounding: useGrounding })
             });
@@ -9107,11 +9596,12 @@ interface AuthContextType {
   logout: () => void;
   isAuthenticated: boolean;
   isLoading: boolean;
+  apiUrl: string; // Add apiUrl to the context
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
+export const AuthProvider = ({ children, apiUrl }: { children: React.ReactNode, apiUrl: string }) => {
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -9153,6 +9643,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     logout,
     isAuthenticated: !!accessToken,
     isLoading,
+    apiUrl, // Provide the runtime URL to the context
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
@@ -9166,8 +9657,8 @@ export const useAuth = () => {
   return context;
 };
 
-export const AppProviders = ({ children }: { children: React.ReactNode }) => {
-    return <AuthProvider>{children}</AuthProvider>
+export const AppProviders = ({ children, apiUrl }: { children: React.ReactNode; apiUrl: string }) => {
+    return <AuthProvider apiUrl={apiUrl}>{children}</AuthProvider>
 };-e 
 -e
 
@@ -9266,6 +9757,36 @@ backend/src
         └── __init__.cpython-313.pyc
 
 16 directories, 41 files
+
+Backend Tests Tree:
+backend/tests
+├── __init__.py
+├── __pycache__
+│   ├── __init__.cpython-313.pyc
+│   └── conftest.cpython-313-pytest-8.4.1.pyc
+├── api
+│   ├── __init__.py
+│   ├── __pycache__
+│   │   └── __init__.cpython-313.pyc
+│   └── v1
+│       ├── __init__.py
+│       ├── __pycache__
+│       │   ├── __init__.cpython-313.pyc
+│       │   ├── test_auth.cpython-313-pytest-8.4.1.pyc
+│       │   ├── test_health.cpython-313-pytest-8.4.1.pyc
+│       │   └── test_reports.cpython-313-pytest-8.4.1.pyc
+│       ├── test_auth.py
+│       ├── test_health.py
+│       └── test_reports.py
+├── conftest.py
+└── core
+    ├── __init__.py
+    ├── __pycache__
+    │   ├── __init__.cpython-313.pyc
+    │   └── test_security.cpython-313-pytest-8.4.1.pyc
+    └── test_security.py
+
+8 directories, 18 files
 
 Web App Tree:
 web/src

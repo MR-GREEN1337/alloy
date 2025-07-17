@@ -3,7 +3,7 @@ import google.generativeai as genai
 from typing import List, Dict, Any, AsyncGenerator, Optional, Tuple, Set
 from loguru import logger
 import json
-import random
+import asyncio
 
 from src.core.settings import get_settings
 from src.services.search import web_search
@@ -38,19 +38,48 @@ async def _summarize_with_gemini(context: str, query: str) -> str:
         logger.error(f"Error during Gemini summarization: {e}")
         return "Could not summarize the search results due to an internal error."
 
-async def _find_qloo_id(client: httpx.AsyncClient, brand_name: str) -> Optional[Tuple[str, str]]:
-    """Finds the Qloo ID and canonical name for a brand."""
+async def _extract_cultural_proxies(context: str, brand_name: str) -> List[str]:
+    """Uses an LLM to identify 3-5 key cultural products/properties from a text."""
+    logger.info(f"Extracting cultural proxies for {brand_name}...")
+    if not context.strip():
+        return []
+    try:
+        model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
+        # CORE FIX: Generalize the prompt to work for more than just media companies.
+        prompt = f"""
+        Based *only* on the following text about '{brand_name}', identify the 3 to 5 most famous and culturally significant properties, products, shows, or public figures associated with them.
+        These items will be used as proxies to understand the brand's cultural footprint.
+
+        CONTEXT:
+        ---
+        {context}
+        ---
+
+        Return a single JSON array of strings. If no specific items are found, return an empty array. Example: ["Famous Product A", "Popular Show B"]
+        """
+        response = await model.generate_content_async(prompt, generation_config={"response_mime_type": "application/json"})
+        proxies = json.loads(response.text)
+        logger.success(f"Extracted proxies for {brand_name}: {proxies}")
+        return proxies
+    except Exception as e:
+        logger.error(f"Error during cultural proxy extraction for {brand_name}: {e}")
+        return []
+
+
+async def _find_qloo_id(client: httpx.AsyncClient, entity_name: str) -> Optional[Tuple[str, str]]:
+    """Finds the Qloo ID and canonical name for any cultural entity."""
     headers = {"x-api-key": settings.QLOO_API_KEY}
-    brand_variations = list(set([
-        brand_name,
-        brand_name.replace("Company", "").replace("Inc.", "").replace("Corp.", "").strip(),
-        brand_name.split(' ')[0],
+    entity_variations = list(set([
+        entity_name,
+        entity_name.title(),
+        entity_name.capitalize(),
     ]))
 
-    for variation in brand_variations:
+    for variation in entity_variations:
         if not variation: continue
         try:
-            search_payload = {"query": variation, "filter": {"type": "urn:entity:brand"}, "take": 1}
+            # Search across multiple relevant categories
+            search_payload = {"query": variation, "filter": {"type": ["urn:entity:movie", "urn:entity:tv_show", "urn:entity:brand", "urn:entity:person", "urn:entity:music_track"]}, "take": 1}
             search_url = "https://hackathon.api.qloo.com/v2/search"
             resp = await client.post(search_url, json=search_payload, headers=headers)
             if resp.status_code != 200: continue
@@ -76,6 +105,15 @@ async def _get_qloo_tastes(client: httpx.AsyncClient, qloo_id: str) -> List[Dict
         logger.error(f"Failed to fetch Qloo tastes for ID {qloo_id}: {e}")
         return []
 
+# --- THE FIX: Create a helper function for concurrent execution ---
+async def _get_tastes_for_term(client: httpx.AsyncClient, term: str) -> Set[str]:
+    """Finds Qloo ID for a term and returns a set of its audience tastes."""
+    qloo_info = await _find_qloo_id(client, term)
+    if qloo_info:
+        tastes = await _get_qloo_tastes(client, qloo_info[0])
+        return {t['name'] for t in tastes if 'name' in t}
+    return set()
+
 # --- Agent Tools ---
 
 async def _web_search_tool(query: str) -> Dict[str, Any]:
@@ -85,153 +123,127 @@ async def _web_search_tool(query: str) -> Dict[str, Any]:
     summary = await _summarize_with_gemini(search_result['context_str'], query)
     return {"context_str": summary, "sources": search_result["sources"]}
 
-async def _qloo_comparative_analysis_tool(acquirer_brand_name: str, target_brand_name: str) -> Dict[str, Any]:
-    """Performs a deep cultural comparison and returns a structured dictionary with pre-analyzed lists."""
-    logger.info(f"AGENT TOOL: Qloo Comparative Analysis for '{acquirer_brand_name}' vs '{target_brand_name}'")
+async def _corporate_culture_tool(brand_name: str) -> Dict[str, Any]:
+    """Researches the corporate culture, values, leadership, and workplace environment of a brand."""
+    logger.info(f"AGENT TOOL: Corporate Culture search for brand: '{brand_name}'")
+    query = f"corporate culture, values, leadership, and workplace environment for {brand_name}"
+    search_result = await web_search(query)
+    summary = await _summarize_with_gemini(search_result['context_str'], query)
+    return {"context_str": summary, "sources": search_result["sources"]}
+
+async def _financial_and_market_tool(brand_name: str) -> Dict[str, Any]:
+    """Researches the financial profile, market position, and recent financial news of a brand."""
+    logger.info(f"AGENT TOOL: Financial/Market search for brand: '{brand_name}'")
+    query = f"financial profile, market position, revenue, and recent financial news for {brand_name}"
+    search_result = await web_search(query)
+    summary = await _summarize_with_gemini(search_result['context_str'], query)
+    return {"context_str": summary, "sources": search_result["sources"]}
+
+
+async def intelligent_cultural_analysis_tool(acquirer_brand_name: str, target_brand_name: str) -> Dict[str, Any]:
+    """
+    Performs a deep, intelligent cultural comparison by finding representative cultural products (proxies) for each brand,
+    aggregating their audience tastes from Qloo, and then performing a comparative analysis.
+    """
+    logger.info(f"AGENT TOOL: INTELLIGENT Cultural Analysis for '{acquirer_brand_name}' vs '{target_brand_name}'")
+
+    # 1. Get profiles to find proxies
+    acquirer_profile_result = await _web_search_tool(f"What are the most famous and representative movies, characters, products, or public figures of the company or brand '{acquirer_brand_name}'?")
+    target_profile_result = await _web_search_tool(f"What are the most famous and representative movies, shows, or public figures from the company or brand '{target_brand_name}'?")
+    
+    # 2. Extract proxies
+    acquirer_proxies = await _extract_cultural_proxies(acquirer_profile_result['context_str'], acquirer_brand_name)
+    target_proxies = await _extract_cultural_proxies(target_profile_result['context_str'], target_brand_name)
+
+    # CORE FIX: Create a hybrid search list. Always include the original brand name as a fallback.
+    acquirer_search_terms = list(set([acquirer_brand_name] + acquirer_proxies))
+    target_search_terms = list(set([target_brand_name] + target_proxies))
+    
+    logger.info(f"Acquirer search terms for Qloo: {acquirer_search_terms}")
+    logger.info(f"Target search terms for Qloo: {target_search_terms}")
+
+    # --- THE FIX: Execute all Qloo API calls concurrently ---
     async with httpx.AsyncClient(timeout=45.0) as client:
-        acquirer_info = await _find_qloo_id(client, acquirer_brand_name)
-        target_info = await _find_qloo_id(client, target_brand_name)
-        if not acquirer_info: return {"context_str": f"Error: Could not find acquirer '{acquirer_brand_name}' in Qloo database."}
-        if not target_info: return {"context_str": f"Error: Could not find target '{target_brand_name}' in Qloo database."}
-        acquirer_tastes = await _get_qloo_tastes(client, acquirer_info[0])
-        target_tastes = await _get_qloo_tastes(client, target_info[0])
-    
-    if not acquirer_tastes or not target_tastes: 
-        return {"context_str": "Error: Could not retrieve taste data.", "qloo_analysis": {}, "culture_clashes": [], "untapped_growths": []}
+        # Create a list of tasks for all acquirer terms
+        acquirer_tasks = [_get_tastes_for_term(client, term) for term in acquirer_search_terms]
+        # Create a list of tasks for all target terms
+        target_tasks = [_get_tastes_for_term(client, term) for term in target_search_terms]
 
-    acquirer_set = {t['name'] for t in acquirer_tastes if t.get('name')}
-    target_set = {t['name'] for t in target_tastes if t.get('name')}
-    
-    # Calculate overlaps and differences
-    shared_tastes = list(acquirer_set.intersection(target_set))
-    union_size = len(acquirer_set.union(target_set))
-    acquirer_unique = list(acquirer_set - target_set)
-    target_unique = list(target_set - acquirer_set)
+        # Run all tasks in parallel
+        logger.info(f"Running {len(acquirer_tasks) + len(target_tasks)} Qloo API calls concurrently...")
+        acquirer_results, target_results = await asyncio.gather(
+            asyncio.gather(*acquirer_tasks),
+            asyncio.gather(*target_tasks)
+        )
+        logger.success("All Qloo API calls completed.")
 
-    # Pre-generate the lists for the final report
-    culture_clashes = [
-        {"topic": topic, "description": f"Acquirer's audience shows affinity for this, a taste not shared by the Target's audience.", "severity": "MEDIUM"}
-        for topic in acquirer_unique[:5]
-    ] + [
-        {"topic": topic, "description": f"Target's audience shows strong affinity for this, a taste not shared by the Acquirer's audience.", "severity": "HIGH"}
-        for topic in target_unique[:5]
-    ]
-    
-    untapped_growths = [
-        {"description": f"Both audiences show a strong affinity for '{topic}'. This shared passion point could be a key pillar for joint marketing campaigns and product integrations.", "potential_impact_score": random.randint(7, 9)}
-        for topic in shared_tastes[:5]
-    ]
+    # Flatten the list of sets into a single set of tastes for each brand
+    aggregated_acquirer_tastes = set().union(*acquirer_results)
+    aggregated_target_tastes = set().union(*target_results)
 
-    # Structure the final output
-    result = {
-        "context_str": "Qloo analysis complete. Affinity scores, clashes, and growth opportunities have been calculated.",
-        "qloo_analysis": {
+    if not aggregated_acquirer_tastes or not aggregated_target_tastes:
+        error_msg = "Error: Could not retrieve any taste data from Qloo for the brands or their cultural products."
+        return {"context_str": error_msg, "culture_clashes": [], "untapped_growths": []}
+    
+    # 4. Perform comparison on aggregated sets
+    shared_tastes = list(aggregated_acquirer_tastes.intersection(aggregated_target_tastes))
+    union_size = len(aggregated_acquirer_tastes.union(aggregated_target_tastes))
+    unique_to_acquirer = list(aggregated_acquirer_tastes - aggregated_target_tastes)
+    unique_to_target = list(aggregated_target_tastes - aggregated_target_tastes)
+
+    culture_clashes = []
+    for interest in unique_to_acquirer[:5]:
+        culture_clashes.append({"topic": interest, "description": "The acquirer's audience ecosystem shows a strong affinity for this, a taste not shared by the target's.", "severity": "MEDIUM"})
+    for interest in unique_to_target[:5]:
+        culture_clashes.append({"topic": interest, "description": "The target's audience ecosystem shows a strong affinity for this, a taste not shared by the acquirer's.", "severity": "HIGH"})
+        
+    untapped_growths = []
+    for interest in shared_tastes[:5]:
+        untapped_growths.append({"description": f"Both audience ecosystems show a strong affinity for '{interest}'. This shared passion could be a key pillar for joint marketing campaigns.", "potential_impact_score": 8})
+
+    # 5. Return the full analysis object
+    return {
+        "context_str": json.dumps({
             "affinity_overlap_score": round((len(shared_tastes) / union_size * 100), 2) if union_size > 0 else 0,
-            "shared_affinities_count": len(shared_tastes),
-            "acquirer_unique_tastes_count": len(acquirer_unique),
-            "target_unique_tastes_count": len(target_unique),
-        },
+            "shared_affinities_top_5": shared_tastes[:5],
+            "acquirer_unique_tastes_top_5": unique_to_acquirer[:5],
+            "target_unique_tastes_top_5": unique_to_target[:5],
+            "analysis_proxies": {"acquirer": acquirer_search_terms, "target": target_search_terms}
+        }),
         "culture_clashes": culture_clashes,
-        "untapped_growths": untapped_growths
+        "untapped_growths": untapped_growths,
+        "sources": acquirer_profile_result.get('sources', []) + target_profile_result.get('sources', [])
     }
-    return result
-
-async def _corporate_culture_research_tool(brand_name: str) -> Dict[str, Any]:
-    """
-    Performs targeted web searches to build a corporate culture and leadership profile.
-    It synthesizes findings on leadership, values, and employee sentiment.
-    """
-    logger.info(f"AGENT TOOL: Corporate Culture Research for: '{brand_name}'")
-    
-    queries = [
-        f"leadership team and bios for {brand_name}",
-        f"corporate values and mission statement of {brand_name}",
-        f"employee reviews and culture at {brand_name} (e.g., from Glassdoor, news articles)",
-    ]
-    
-    combined_context = ""
-    all_sources = []
-    
-    for query in queries:
-        search_result = await web_search(query)
-        if search_result and search_result['context_str']:
-            combined_context += f"\n\n--- Results for query: '{query}' ---\n{search_result['context_str']}"
-            all_sources.extend(search_result['sources'])
-
-    if not combined_context.strip():
-        return {"context_str": f"No significant corporate culture information could be found for '{brand_name}' via web search.", "sources": []}
-        
-    summary_query = f"Synthesize a corporate culture profile for {brand_name}. Focus on: 1. Leadership style and key executives. 2. Stated company values and mission. 3. Publicly perceived employee sentiment and work culture."
-    summary = await _summarize_with_gemini(combined_context, summary_query)
-
-    unique_sources = list({v['url']:v for v in all_sources}.values())
-    return {"context_str": summary, "sources": unique_sources}
-
-async def _financial_and_market_analysis_tool(brand_name: str) -> Dict[str, Any]:
-    """
-    Performs web searches to build a high-level financial and market profile.
-    Synthesizes findings on financial metrics, SWOT, and market position.
-    """
-    logger.info(f"AGENT TOOL: Financial & Market Analysis for: '{brand_name}'")
-    
-    queries = [
-        f"key financial metrics for {brand_name}",
-        f"SWOT analysis for {brand_name}",
-        f"{brand_name} market position and key competitors",
-    ]
-    
-    combined_context = ""
-    all_sources = []
-    
-    for query in queries:
-        search_result = await web_search(query)
-        if search_result and search_result['context_str']:
-            combined_context += f"\n\n--- Results for query: '{query}' ---\n{search_result['context_str']}"
-            all_sources.extend(search_result['sources'])
-
-    if not combined_context.strip():
-        return {"context_str": f"No significant financial or market information could be found for '{brand_name}' via web search.", "sources": []}
-        
-    summary_query = f"Synthesize a high-level financial and market profile for {brand_name}. Focus on: 1. Key financial health indicators (e.g., revenue, growth trends). 2. A brief SWOT analysis (Strengths, Weaknesses, Opportunities, Threats). 3. Its primary market position and main competitors."
-    summary = await _summarize_with_gemini(combined_context, summary_query)
-
-    unique_sources = list({v['url']:v for v in all_sources}.values())
-    return {"context_str": summary, "sources": unique_sources}
 
 # --- The Stateful ReAct Agent ---
 class AlloyReActAgent:
     PROMPT_TEMPLATE = """
-    You are a data-gathering AI assistant.
-
-    **PRIMARY DIRECTIVE:** Your only job is to execute a sequence of tool calls to gather all the necessary data for a comprehensive M&A due diligence report.
-
-    **RULES:**
-    1.  You MUST respond with a "Thought" and an "Action" in this exact format.
-    2.  Your "Action" MUST be a single, valid JSON object.
-    3.  The JSON object MUST have a `tool_name` key (the name of the tool to use).
-    4.  The JSON object MUST have a `parameters` key, which is an object of the tool's arguments.
-
-    **DATA-GATHERING TASKS (in any logical order):**
-    1.  **Company Profiles:** Get a general overview of each company's business.
-    2.  **Corporate Culture:** Investigate the internal culture, leadership, and values of each company.
-    3.  **Audience Affinity:** Analyze the cultural tastes of each company's audience. This tool also generates the `culture_clashes` and `untapped_growths` lists automatically.
-    4.  **Financial & Market Health:** Get a high-level overview of each company's market position and financial health.
+    You are a data-gathering AI assistant for a financial firm.
+    Your only job is to execute a sequence of tool calls to gather information about two companies and their cultural overlap.
+    Do not synthesize, analyze, or generate the final report yourself. Simply gather the data and pass it to the 'finish' tool.
 
     **TOOLS:**
-    - `web_search(query: str)`: Use for **Task 1**.
-    - `corporate_culture_research(brand_name: str)`: Use for **Task 2**.
-    - `qloo_comparative_analysis(acquirer_brand_name: str, target_brand_name: str)`: Use for **Task 3**.
-    - `financial_and_market_analysis_tool(brand_name: str)`: Use for **Task 4**.
-    - `finish(gathered_data: dict)`: Call this tool ONLY when all other data-gathering tasks are complete. The `gathered_data` object MUST contain these keys: `acquirer_profile`, `target_profile`, `acquirer_culture_profile`, `target_culture_profile`, `acquirer_financial_profile`, `target_financial_profile`, `qloo_analysis`, `culture_clashes`, `untapped_growths`.
+    - `web_search(query: str)`: For general company profile research.
+    - `corporate_culture_tool(brand_name: str)`: To get specific information on a company's culture, values, and leadership.
+    - `financial_and_market_tool(brand_name: str)`: To get specific information on a company's financial health and market position.
+    - `intelligent_cultural_analysis_tool(acquirer_brand_name: str, target_brand_name: str)`: For deep cultural analysis, finding clashes, and growth opportunities. THIS IS THE PRIMARY TOOL FOR CULTURAL DATA.
+    - `finish(gathered_data: dict)`: Use this ONLY when all data gathering steps are complete. The `gathered_data` parameter must be a JSON object containing keys for acquirer/target profiles, culture profiles, financial profiles, and the qloo analysis.
 
-    **EXAMPLE ACTION FORMAT:**
+    **RESPONSE FORMAT (JSON ONLY):**
+    You MUST respond with a single JSON object containing a "thought" and an "action".
+    The "action" MUST be an object with "tool_name" and "parameters".
+    
+    Example:
     ```json
-    {
-      "tool_name": "web_search",
-      "parameters": {
-        "query": "Example Inc. company profile"
-      }
-    }
+    {{
+      "thought": "I need to get the general company profile for the acquirer.",
+      "action": {{
+        "tool_name": "web_search",
+        "parameters": {{
+          "query": "{acquirer_brand} company profile"
+        }}
+      }}
+    }}
     ```
 
     **CURRENT TASK:**
@@ -240,8 +252,11 @@ class AlloyReActAgent:
 
     **COMPLETED STEPS:**
     {completed_steps}
+    
+    **PREVIOUS ACTIONS LOG:**
+    {scratchpad}
 
-    Based on the completed steps, what is the next logical data-gathering action?
+    Based on the completed steps and previous actions, what is the next logical data-gathering action? Return ONLY the JSON object.
     """
 
     def __init__(self, acquirer_brand: str, target_brand: str, user_context: str | None = None):
@@ -254,126 +269,131 @@ class AlloyReActAgent:
         self.gathered_data = {} 
         self.final_data = None
         self.tools = {
-            "web_search": _web_search_tool, 
-            "qloo_comparative_analysis": _qloo_comparative_analysis_tool,
-            "corporate_culture_research": _corporate_culture_research_tool,
-            "financial_and_market_analysis_tool": _financial_and_market_analysis_tool
+            "web_search": _web_search_tool,
+            "intelligent_cultural_analysis_tool": intelligent_cultural_analysis_tool,
+            "corporate_culture_tool": _corporate_culture_tool,
+            "financial_and_market_tool": _financial_and_market_tool
         }
         self.all_sources: Dict[str, List[Dict[str, str]]] = {
-            'acquirer_sources': [], 'target_sources': [], 
+            'acquirer_sources': [], 'target_sources': [], 'search_sources': [],
             'acquirer_culture_sources': [], 'target_culture_sources': [],
-            'acquirer_financial_sources': [], 'target_financial_sources': [],
-            'search_sources': []
+            'acquirer_financial_sources': [], 'target_financial_sources': []
         }
 
     def _build_prompt(self) -> str:
         """Builds the prompt with the current state of completed steps."""
         completed_steps_str = "\n".join(f"- {step}" for step in sorted(list(self.completed_steps))) or "None"
+        # Truncate scratchpad to keep the prompt within reasonable size limits
+        scratchpad_log = "\n".join(self.scratchpad.splitlines()[-10:])
         return self.PROMPT_TEMPLATE.format(
             acquirer_brand=self.acquirer_brand,
             target_brand=self.target_brand,
             user_context=self.user_context,
-            completed_steps=completed_steps_str
-        ) + self.scratchpad
+            completed_steps=completed_steps_str,
+            scratchpad=scratchpad_log
+        )
 
     async def run_stream(self) -> AsyncGenerator[Dict[str, Any], None]:
-        max_turns = 8
+        max_turns = 10 
         for i in range(max_turns):
             yield {"status": "thinking", "message": f"Agent reasoning (Step {i+1}/{max_turns})"}
             
             prompt = self._build_prompt()
             response_text = await self._get_llm_response(prompt)
             
-            if "**Action**:" not in response_text:
-                yield {"status": "thought", "message": response_text.replace("**Thought**:", "").strip()}
-                logger.warning("Agent produced a thought but no action. Ending turn.")
-                observation = "Error: Your response did not include an 'Action' block. You must provide an action."
-                self.scratchpad += f"\n**Thought**: {response_text.replace('**Thought**:', '').strip()}\n**Observation**: {observation}"
-                continue
-
-            parts = response_text.split("**Action**:", 1)
-            thought = parts[0].replace("**Thought**:", "").strip()
-            action_str = parts[1].strip().replace("```json", "").replace("```", "")
-            yield {"status": "thought", "message": thought}
-            
             try:
-                action_json = json.loads(action_str)
+                # Parse the entire response as a JSON object
+                response_json = json.loads(response_text)
+                thought = response_json.get("thought", "No thought provided.")
+                action_json = response_json.get("action", {})
+                yield {"status": "thought", "message": thought}
                 yield {"status": "action", "payload": action_json}
-            except json.JSONDecodeError as e:
-                logger.error(f"JSON parsing error: {e}. Raw action: {action_str}")
-                yield {"status": "error", "message": f"Agent provided invalid JSON: {e}"}
-                observation = f"Error: The Action was not valid JSON. You must provide a single, correctly formatted JSON object. For example: {{\"tool_name\": \"web_search\", \"parameters\": {{\"query\": \"some query\"}}}}"
-                self.scratchpad += f"\n**Thought**: {thought}\n**Action**: {action_str}\n**Observation**: {observation}"
+            except (json.JSONDecodeError, AttributeError) as e:
+                logger.error(f"Agent response was not valid JSON: {e}. Raw response: {response_text}")
+                yield {"status": "error", "message": f"Agent produced an invalid response: {e}"}
+                observation = f"Error: The previous response was not a valid JSON object with 'thought' and 'action' keys. Please correct the format. The error was: {e}"
+                self.scratchpad += f"\n**Observation**: {observation}"
                 continue
 
-            tool_name = action_json.get("tool_name")
-            params = action_json.get("parameters", {})
+            tool_name, params = action_json.get("tool_name"), action_json.get("parameters", {})
             
             if not tool_name:
                 observation = "Error: Your action JSON is missing the 'tool_name' key."
             elif tool_name == "finish":
+                required_keys = ['acquirer_profile', 'target_profile', 'qloo_analysis', 'acquirer_culture_profile', 'target_culture_profile', 'acquirer_financial_profile', 'target_financial_profile']
+                for key in required_keys:
+                    if key not in self.gathered_data:
+                        self.gathered_data[key] = f"Data for '{key}' was not gathered."
+                
                 self.final_data = params.get("gathered_data", self.gathered_data)
                 yield {"status": "complete"}
                 return
             elif tool_name not in self.tools:
-                observation = f"Error: Unknown tool '{tool_name}'. Please use one of the available tools."
+                observation = f"Error: Unknown tool '{tool_name}'."
             else:
                 try:
                     tool_result = await self.tools[tool_name](**params)
                     observation = tool_result.get('context_str', f"Tool {tool_name} ran but provided no context.")
+                    sources = tool_result.get('sources', [])
                     
+                    search_string = " ".join(str(v) for v in params.values()).lower()
+                    is_acquirer = self.acquirer_brand.lower() in search_string
+                    is_target = self.target_brand.lower() in search_string
+                    
+                    # More robust check
+                    if 'brand_name' in params and params['brand_name'] == self.acquirer_brand: is_acquirer = True
+                    if 'brand_name' in params and params['brand_name'] == self.target_brand: is_target = True
+
                     if tool_name == "web_search":
-                        query = params.get('query','').lower()
-                        if self.acquirer_brand.lower() in query:
-                            self.completed_steps.add("searched_acquirer")
+                        if is_acquirer and not is_target:
+                            self.completed_steps.add("searched_acquirer_profile")
                             self.gathered_data['acquirer_profile'] = observation
-                            self.all_sources['acquirer_sources'].extend(tool_result.get('sources', []))
-                        elif self.target_brand.lower() in query:
-                            self.completed_steps.add("searched_target")
+                            self.all_sources['acquirer_sources'].extend(sources)
+                        elif is_target and not is_acquirer:
+                            self.completed_steps.add("searched_target_profile")
                             self.gathered_data['target_profile'] = observation
-                            self.all_sources['target_sources'].extend(tool_result.get('sources', []))
+                            self.all_sources['target_sources'].extend(sources)
                         
-                        for source in tool_result.get('sources', []):
-                            yield {"status": "source", "payload": source}
-
-                    elif tool_name == "corporate_culture_research":
-                        brand = params.get('brand_name', '').lower()
-                        if self.acquirer_brand.lower() in brand:
-                            self.completed_steps.add("researched_acquirer_culture")
+                    elif tool_name == "corporate_culture_tool":
+                        if is_acquirer:
+                            self.completed_steps.add("searched_acquirer_culture")
                             self.gathered_data['acquirer_culture_profile'] = observation
-                            self.all_sources['acquirer_culture_sources'].extend(tool_result.get('sources', []))
-                        elif self.target_brand.lower() in brand:
-                            self.completed_steps.add("researched_target_culture")
+                            self.all_sources['acquirer_culture_sources'].extend(sources)
+                        elif is_target:
+                            self.completed_steps.add("searched_target_culture")
                             self.gathered_data['target_culture_profile'] = observation
-                            self.all_sources['target_culture_sources'].extend(tool_result.get('sources', []))
-                        for source in tool_result.get('sources', []): yield {"status": "source", "payload": source}
-
-                    elif tool_name == "financial_and_market_analysis_tool":
-                        brand = params.get('brand_name', '').lower()
-                        if self.acquirer_brand.lower() in brand:
-                            self.completed_steps.add("researched_acquirer_financials")
-                            self.gathered_data['acquirer_financial_profile'] = observation
-                            self.all_sources['acquirer_financial_sources'].extend(tool_result.get('sources', []))
-                        elif self.target_brand.lower() in brand:
-                            self.completed_steps.add("researched_target_financials")
-                            self.gathered_data['target_financial_profile'] = observation
-                            self.all_sources['target_financial_sources'].extend(tool_result.get('sources', []))
-                        for source in tool_result.get('sources', []): yield {"status": "source", "payload": source}
+                            self.all_sources['target_culture_sources'].extend(sources)
                     
-                    elif tool_name == "qloo_comparative_analysis":
-                        self.completed_steps.add("performed_qloo_analysis")
-                        self.gathered_data['qloo_analysis'] = tool_result.get('qloo_analysis', {})
-                        self.gathered_data['culture_clashes'] = tool_result.get('culture_clashes', [])
-                        self.gathered_data['untapped_growths'] = tool_result.get('untapped_growths', [])
+                    elif tool_name == "financial_and_market_tool":
+                        if is_acquirer:
+                            self.completed_steps.add("searched_acquirer_financial")
+                            self.gathered_data['acquirer_financial_profile'] = observation
+                            self.all_sources['acquirer_financial_sources'].extend(sources)
+                        elif is_target:
+                            self.completed_steps.add("searched_target_financial")
+                            self.gathered_data['target_financial_profile'] = observation
+                            self.all_sources['target_financial_sources'].extend(sources)
 
-                except TypeError as e:
-                    logger.error(f"Type error executing tool '{tool_name}': {e}", exc_info=True)
-                    observation = f"Error: Tool '{tool_name}' was called with incorrect or missing parameters. The error was: {e}. Please correct the 'parameters' object in your next action."
+                    elif tool_name == "intelligent_cultural_analysis_tool":
+                        self.completed_steps.add("performed_intelligent_qloo_analysis")
+                        self.all_sources['search_sources'].extend(sources) # Add sources from proxy search
+                        try:
+                            self.gathered_data['qloo_analysis'] = json.loads(observation)
+                            self.gathered_data['culture_clashes'] = tool_result.get('culture_clashes', [])
+                            self.gathered_data['untapped_growths'] = tool_result.get('untapped_growths', [])
+                        except (json.JSONDecodeError, TypeError):
+                            self.gathered_data['qloo_analysis'] = {"error": observation}
+                            self.gathered_data['culture_clashes'] = []
+                            self.gathered_data['untapped_growths'] = []
+
+                    for source in sources:
+                        yield {"status": "source", "payload": source}
+
                 except Exception as e:
                     logger.error(f"Error executing tool '{tool_name}': {e}", exc_info=True)
                     observation = f"Error: {e}"
 
-            self.scratchpad += f"\n**Thought**: {thought}\n**Action**: {json.dumps(action_json)}\n**Observation**: {observation}"
+            self.scratchpad += f"\nAction: {json.dumps(action_json)}\nObservation: {observation}"
             yield {"status": "observation", "message": f"Observation from {tool_name}"}
 
         logger.warning("Agent exceeded maximum turns.")
@@ -382,8 +402,18 @@ class AlloyReActAgent:
 
     async def _get_llm_response(self, prompt) -> str:
         try:
-            response = await self.model.generate_content_async(prompt)
+            # Enforce JSON output from the model
+            generation_config = {"response_mime_type": "application/json"}
+            response = await self.model.generate_content_async(prompt, generation_config=generation_config)
             return response.text
         except Exception as e:
             logger.error(f"Gemini API call failed: {e}")
-            return f'**Thought**: A critical error occurred. I must finish now.\n**Action**: {json.dumps({"tool_name": "finish", "parameters": {"gathered_data": self.gathered_data}})}'
+            # Fallback to a finish action if the LLM fails
+            finish_action = {
+                "thought": "A critical error occurred with the LLM. I must finish now.",
+                "action": {
+                    "tool_name": "finish",
+                    "parameters": {"gathered_data": self.gathered_data}
+                }
+            }
+            return json.dumps(finish_action)

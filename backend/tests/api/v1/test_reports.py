@@ -3,6 +3,7 @@ from httpx import AsyncClient
 from fastapi import status
 from sqlalchemy.ext.asyncio import AsyncSession
 import json
+import uuid
 
 from src.db import models
 from src.db.postgresql import postgres_db
@@ -12,9 +13,11 @@ async def test_create_and_get_reports(authorized_client: AsyncClient, test_user:
     # Create a draft report
     response = await authorized_client.post("/api/v1/reports/draft")
     assert response.status_code == status.HTTP_201_CREATED
-    draft_report = response.json()
-    assert draft_report["status"] == "DRAFT"
-    assert draft_report["user_id"] == test_user.id
+    draft_report_data = response.json()
+    assert draft_report_data["status"] == "DRAFT"
+    assert draft_report_data["user_id"] == test_user.id
+    # Check that the ID is a valid UUID string
+    assert uuid.UUID(draft_report_data["id"])
 
     # Create a completed report manually for testing GET
     completed_report = models.Report(
@@ -33,7 +36,7 @@ async def test_create_and_get_reports(authorized_client: AsyncClient, test_user:
     assert response.status_code == status.HTTP_200_OK
     reports_list = response.json()
     assert len(reports_list) == 1
-    assert reports_list[0]["id"] == completed_report.id
+    assert reports_list[0]["id"] == str(completed_report.id)
     assert reports_list[0]["title"] == "Completed Test Report"
 
     # Get a specific report by ID
@@ -100,7 +103,7 @@ async def test_generate_report_stream_mocked(authorized_client: AsyncClient, tes
     # --- Assertions ---
     final_event = events[-1] if events else {}
     assert final_event.get("status") == "complete", f"Stream did not complete successfully. Last event: {final_event}"
-    assert final_event.get("payload", {}).get("reportId") == report_id_to_check
+    assert final_event.get("payload", {}).get("reportId") == str(report_id_to_check)
 
     # Assert the database state was updated correctly using a fresh session
     async with postgres_db.get_session() as session:

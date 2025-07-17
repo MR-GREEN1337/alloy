@@ -60,8 +60,7 @@ const useParsedReport = (report: Report) => {
 };
 
 const CompanyLogo = ({ brandName }: { brandName: string }) => {
-    const API_URL = process.env.NEXT_PUBLIC_API_URL;
-    const faviconUrl = `${API_URL}/utils/favicon?brandName=${encodeURIComponent(brandName)}`;
+    const faviconUrl = `/api/v1/utils/favicon?brandName=${encodeURIComponent(brandName)}`;
     return (
         <div className="flex items-center gap-3">
             <Image src={faviconUrl} alt={`${brandName} logo`} width={40} height={40} className="rounded-lg border bg-background p-1" unoptimized priority={false}/>
@@ -81,10 +80,9 @@ const SeverityBadge = ({ severity }: { severity: ClashSeverity }) => {
 };
 
 const SourcePill = ({ url }: { url: string }) => {
-    const API_URL = process.env.NEXT_PUBLIC_API_URL;
     try {
         const domain = new URL(url).hostname?.replace('www.', '');
-        const faviconUrl = `${API_URL}/utils/favicon?url=${encodeURIComponent(url)}`;
+        const faviconUrl = `/api/v1/utils/favicon?url=${encodeURIComponent(url)}`;
         return (
             <Link href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-full border bg-secondary/50 px-3 py-1 text-sm text-secondary-foreground transition-colors hover:bg-secondary">
                 <Image src={faviconUrl} alt={`${domain} favicon`} width={16} height={16} className="rounded-full" unoptimized/>
@@ -103,7 +101,9 @@ const ReportHeader = ({ report, children }: { report: Report, children?: React.R
     <div className="space-y-4">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
             <CompanyLogo brandName={report.acquirer_brand} />
-            <Zap className="h-8 w-8 text-muted-foreground flex-shrink-0" />
+            <span className="h-8 w-8 text-muted-foreground flex-shrink-0">
+                ACQUIRING
+            </span>
             <CompanyLogo brandName={report.target_brand} />
         </div>
         <Card>

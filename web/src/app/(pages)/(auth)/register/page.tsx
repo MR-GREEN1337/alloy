@@ -22,7 +22,7 @@ export default function RegisterPage() {
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const { login } = useAuth();
+  const { login, apiUrl } = useAuth();
   const router = useRouter();
 
   const handleRegister = async (e: FormEvent) => {
@@ -40,7 +40,7 @@ export default function RegisterPage() {
 
     try {
       // 1. Register the user
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/register`, {
+      const res = await fetch(`/api/v1/auth/register`, {
         method: 'POST',
         body: JSON.stringify({ email, password, full_name: "" }),
         headers: { 'Content-Type': 'application/json' }
@@ -53,7 +53,7 @@ export default function RegisterPage() {
       }
       
       // 2. Log the user in to get tokens
-      const loginRes = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/login`, {
+      const loginRes = await fetch(`/api/v1/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: formData.toString(),
@@ -71,7 +71,9 @@ export default function RegisterPage() {
       setError(err instanceof Error ? err.message : "An unexpected error occurred. Please try again.");
     }
   };
-  const googleAuthUrl = `${process.env.NEXT_PUBLIC_API_URL}/auth/google/authorize`;
+  
+  // The Google Auth URL MUST be absolute and include the /api/v1 prefix.
+  const googleAuthUrl = `${apiUrl}/api/v1/auth/google/authorize`;
 
   return (
     <Card className="w-full max-w-sm">

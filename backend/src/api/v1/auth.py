@@ -3,7 +3,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from typing import Annotated, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 import httpx
 from loguru import logger
 import uuid
@@ -55,6 +55,33 @@ GUEST_NAMES = [
 ]
 
 # --- Helper Function ---
+def get_backend_base_url() -> str:
+    """
+    Determines the backend's base URL. In production, it uses the first
+    CORS origin (which should be the frontend URL) to derive the backend URL,
+    ensuring the correct scheme (https://) and domain.
+    """
+    # In a production/staging environment, trust the CORS origin setting.
+    # This assumes the frontend and backend are on the same domain.
+    # e.g., web is on https://alloy.app, backend is on https://alloy.app
+    if settings.ENVIRONMENT != "development":
+        # We assume the first CORS origin is the primary frontend URL.
+        # e.g., https://alloy-web-*.run.app
+        frontend_url = settings.CORS_ORIGINS[0]
+        parsed_uri = urlparse(frontend_url)
+        # We derive the backend URL from the web URL. This is a common pattern
+        # when they are hosted on subdomains of the same parent service.
+        # This part might need adjustment based on your specific CNAME/DNS setup.
+        # For Cloud Run, this simple replacement is often sufficient if you use a similar naming convention.
+        backend_host = parsed_uri.hostname.replace("web", "backend") if parsed_uri.hostname else "localhost"
+        return f"https://{backend_host}"
+    
+    # In development, you might be running on http://localhost:8000
+    # A more robust solution for dev would be to use an env var.
+    # For now, we will construct it simply.
+    return "http://localhost:8000"
+
+
 async def create_user_if_not_exists(session: AsyncSession, user_data: Dict[str, Any]) -> models.User:
     db_user = await get_user_by_email(session, user_data["email"])
     if db_user:
@@ -136,7 +163,18 @@ async def refresh_access_token(
 
 @router.get("/google/authorize", tags=["auth"], response_class=RedirectResponse)
 async def google_authorize(request: Request):
-    redirect_uri = f"{str(request.base_url).rstrip('/')}/api/v1/auth/google/callback"
+    # THE FIX: Use the request's own headers to determine the base URL
+    # This correctly handles https and the domain from behind a proxy.
+    # Cloud Run provides X-Forwarded-Proto and X-Forwarded-Host headers.
+    scheme = request.headers.get("x-forwarded-proto", "http")
+    host = request.headers.get("x-forwarded-host", request.url.netloc)
+    
+    # Construct the base URL and the final redirect URI
+    base_url = f"{scheme}://{host}"
+    redirect_uri = f"{base_url}/api/v1/auth/google/callback"
+    
+    logger.info(f"Generated Google redirect URI: {redirect_uri}")
+
     params = {
         "client_id": settings.GOOGLE_CLIENT_ID,
         "redirect_uri": redirect_uri,
@@ -154,7 +192,13 @@ async def google_callback(
     request: Request, code: str, session: DBSession
 ):
     """Handles the callback from Google, exchanges code for token, and gets user info."""
-    redirect_uri = f"{str(request.base_url).rstrip('/')}/api/v1/auth/google/callback"
+    # THE FIX: Reconstruct the redirect_uri exactly as it was in the authorize step.
+    scheme = request.headers.get("x-forwarded-proto", "http")
+    host = request.headers.get("x-forwarded-host", request.url.netloc)
+    base_url = f"{scheme}://{host}"
+    redirect_uri = f"{base_url}/api/v1/auth/google/callback"
+
+    logger.info(f"Handling Google callback for redirect URI: {redirect_uri}")
 
     token_data = {
         "code": code,
@@ -191,6 +235,7 @@ async def google_callback(
     refresh_token = create_refresh_token(data={"sub": user.email})
 
     params = urlencode({"access_token": access_token, "refresh_token": refresh_token})
+    # Use the first CORS origin as the definitive frontend URL to redirect back to.
     frontend_redirect_url = f"{settings.CORS_ORIGINS[0]}/token?{params}"
     
     return RedirectResponse(url=frontend_redirect_url)

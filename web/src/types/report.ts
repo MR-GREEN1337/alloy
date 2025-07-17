@@ -1,5 +1,5 @@
 export interface Report {
-  id: number;
+  id: string; // Changed from number
   title: string;
   acquirer_brand: string;
   target_brand: string;
@@ -18,7 +18,7 @@ export interface ReportAnalysis {
   affinity_overlap_score: number;
   brand_archetype_summary: string | { acquirer_archetype?: string, target_archetype?: string }; 
   strategic_summary: string;
-  report_id: number;
+  report_id: string; // Changed from number
   search_sources?: Array<{ title: string; url: string }>;
   acquirer_sources?: Array<{ title: string; url: string }>;
   target_sources?: Array<{ title: string; url: string }>;
@@ -45,12 +45,12 @@ export interface CultureClash {
   topic: string;
   description: string;
   severity: ClashSeverity;
-  report_id: number;
+  report_id: string; // Changed from number
 }
 
 export interface UntappedGrowth {
   id: number;
   description: string;
   potential_impact_score: number;
-  report_id: number;
+  report_id: string; // Changed from number
 }
