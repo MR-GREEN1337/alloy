@@ -6,6 +6,7 @@ import { useAuth } from "@/components/global/providers";
 import { Sidebar } from "@/components/global/Sidebar";
 import { ThemeProvider as NextThemesProvider } from "next-themes";
 import { Header } from "@/components/global/Header";
+import { PageLoader } from "@/components/global/PageLoader";
 
 export default function AuthedLayout({
   children,
@@ -22,11 +23,7 @@ export default function AuthedLayout({
   }, [isLoading, isAuthenticated, router]);
 
   if (isLoading || !isAuthenticated) {
-    return (
-      <div className="flex h-screen w-full items-center justify-center bg-background">
-        Loading...
-      </div>
-    );
+    return <PageLoader />;
   }
 
   return (

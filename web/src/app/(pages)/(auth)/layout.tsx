@@ -6,6 +6,7 @@ import { useAuth } from '@/components/global/providers';
 import { AuthVisual } from "@/components/auth/AuthVisual";
 import Logo from "@/components/global/Logo";
 import Link from "next/link";
+import { PageLoader } from '@/components/global/PageLoader';
 
 export default function AuthLayout({
   children,
@@ -25,11 +26,7 @@ export default function AuthLayout({
 
   // While loading or if authenticated (and about to be redirected), show a loading screen
   if (isLoading || isAuthenticated) {
-    return (
-      <div className="flex h-screen w-full items-center justify-center bg-background">
-        Loading...
-      </div>
-    );
+    return <PageLoader />;
   }
 
   // Only show the auth layout if the user is not authenticated

@@ -5,6 +5,7 @@ import { PromptInputBox } from "@/components/global/PromptInputBox";
 import { DashboardGreeting } from "@/components/global/DashboardGreeting";
 import { useAuth } from "@/components/global/providers";
 import { useRouter } from "next/navigation";
+import { PageLoader } from "@/components/global/PageLoader";
 
 export default function DashboardPage() {
     const { isLoading } = useAuth();
@@ -18,7 +19,7 @@ export default function DashboardPage() {
     };
 
     if (isLoading) {
-      return <div className="flex h-full items-center justify-center"><p>Loading...</p></div>
+      return <PageLoader />;
     }
     
     return (
