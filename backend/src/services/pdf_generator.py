@@ -6,10 +6,11 @@ from datetime import datetime
 import io
 import json
 from loguru import logger
+from typing import Optional
 
 from src.db import models
 from src.core.settings import get_settings
-from src.services.pdf_template import (
+from src.services.pdf_layouts import (
     get_pdf_styles,
     create_header,
     create_title_section,
@@ -17,14 +18,20 @@ from src.services.pdf_template import (
     create_corporate_culture_section,
     create_financial_analysis_section,
     create_clashes_table,
-    create_growth_table
+    create_growth_table,
+    create_brand_archetypes_section
 )
 
 settings = get_settings()
 genai.configure(api_key=settings.GEMINI_API_KEY)
 
 
-def create_report_pdf(report: models.Report, llm_summary: dict) -> bytes:
+def create_report_pdf(
+    report: models.Report, 
+    llm_summary: dict,
+    acquirer_favicon_bytes: Optional[bytes],
+    target_favicon_bytes: Optional[bytes]
+) -> bytes:
     """
     Assembles the PDF from static templates and LLM-generated content using reportlab.
     """
@@ -35,13 +42,15 @@ def create_report_pdf(report: models.Report, llm_summary: dict) -> bytes:
                             rightMargin=0.75*inch,
                             leftMargin=0.75*inch,
                             topMargin=0.75*inch,
-                            bottomMargin=1.0*inch)
+                            bottomMargin=1.0*inch,
+                            title=report.title) # Set the document title metadata
     
     styles = get_pdf_styles()
     story = []
 
     story.extend(create_header(styles))
-    story.extend(create_title_section(report, styles))
+    # THE FIX: Pass the favicon bytes to the title section layout function.
+    story.extend(create_title_section(report, styles, acquirer_favicon_bytes, target_favicon_bytes))
     story.extend(create_key_metrics_table(report, doc.width, styles))
     
     # --- Main Qualitative Summaries ---
@@ -51,16 +60,8 @@ def create_report_pdf(report: models.Report, llm_summary: dict) -> bytes:
     
     # Add the new sections
     story.extend(create_financial_analysis_section(llm_summary, styles))
-    story.extend(create_corporate_culture_section(report, llm_summary, doc.width, styles))
-
-    story.append(Paragraph("Brand Archetypes", styles['h2']))
-    archetypes = llm_summary.get("brand_archetypes", {})
-    story.append(Paragraph(report.acquirer_brand, styles['h3']))
-    story.append(Paragraph(archetypes.get('acquirer', 'N/A'), styles['default']))
-    story.append(Spacer(1, 0.1*inch))
-    story.append(Paragraph(report.target_brand, styles['h3']))
-    story.append(Paragraph(archetypes.get('target', 'N/A'), styles['default']))
-    story.append(Spacer(1, 0.3*inch))
+    story.extend(create_corporate_culture_section(report, llm_summary, doc.width, styles, acquirer_favicon_bytes, target_favicon_bytes))
+    story.extend(create_brand_archetypes_section(report, llm_summary, styles, acquirer_favicon_bytes, target_favicon_bytes))
 
     # --- Detailed Data Tables ---
     story.extend(create_clashes_table(report, doc.width, styles))

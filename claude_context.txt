@@ -902,6 +902,29 @@ async def find_favicon_url(url: str, client: httpx.AsyncClient) -> Optional[str]
         return favicon_url
     return None
 
+async def fetch_favicon_bytes(brand_name: str) -> Optional[bytes]:
+    """Finds a brand's favicon and returns its raw bytes."""
+    logger.info(f"Fetching favicon bytes for PDF: '{brand_name}'")
+    try:
+        website_url = await find_official_website(brand_name)
+        if not website_url:
+            return None
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        async with httpx.AsyncClient(follow_redirects=True, headers=headers) as client:
+            favicon_url = await find_favicon_url(website_url, client)
+            if not favicon_url:
+                return None
+            
+            response = await client.get(favicon_url, timeout=10)
+            response.raise_for_status()
+            return response.content
+    except Exception as e:
+        logger.warning(f"Could not fetch favicon bytes for '{brand_name}': {e}")
+        return None
+
 @router.get("/favicon", response_class=RedirectResponse, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 async def get_favicon(
     url: Optional[str] = Query(None),
@@ -955,11 +978,13 @@ from fastapi.responses import StreamingResponse, Response
 import json
 import google.generativeai as genai
 import uuid
+import asyncio
 
 from src.db.postgresql import get_session, postgres_db
 from src.db import models
 from src.core.settings import get_settings
 from src.api.v1.auth import get_current_user
+from src.api.v1.utils import fetch_favicon_bytes
 from src.services.react_agent import AlloyReActAgent
 from src.services.docling import process_document_with_docling
 from src.services.report_generator import generate_chat_response
@@ -1018,49 +1043,61 @@ async def mark_report_as_failed(report_id: uuid.UUID) -> None:
         logger.error(f"Could not mark report {report_id} as FAILED: {e}")
 
 async def synthesize_final_report(agent_data: dict) -> dict:
-    """Takes the agent's gathered data and synthesizes the final report with an LLM call."""
+    """
+    Takes the agent's gathered data, uses an LLM to synthesize qualitative summaries,
+    and then programmatically adds the quantitative scores for a reliable final report.
+    """
     logger.info("Synthesizing final report from agent data.")
-    model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
     
+    # --- Part 1: Handle scores deterministically in Python ---
+    qloo_analysis = agent_data.get('qloo_analysis', {})
+    affinity_score = _safe_float(qloo_analysis.get('affinity_overlap_score', 0.0))
+    cultural_score = affinity_score
+    
+    # --- Part 2: Simplify the LLM's task to only text synthesis ---
     data_for_synthesis = {
         key: value for key, value in agent_data.items() 
-        if key not in ['culture_clashes', 'untapped_growths']
+        if key not in ['culture_clashes', 'untapped_growths', 'qloo_analysis']
     }
 
+    model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
     prompt = f"""
     You are a senior M&A analyst from a top-tier investment bank. You have been provided with raw data from your junior research team.
-    Your task is to synthesize this data into a final, professional due diligence report.
+    Your task is to synthesize this data into professional, qualitative summaries for a due diligence report.
 
     **RAW DATA FOR SYNTHESIS:**
     ```json
     {json.dumps(data_for_synthesis, indent=2)}
     ```
 
-    **YOUR TASK (Return a single JSON object):**
+    **YOUR TASK (Return a single JSON object with TEXT summaries only):**
     Based *only* on the raw data provided, generate a complete report with the following keys:
-    - "cultural_compatibility_score": A float (0-100). Base this on affinity_overlap_score. A high score is good. If Qloo fails, score is 0.0.
-    - "affinity_overlap_score": A float, taken directly from the 'qloo_analysis'. If it's missing, this should be 0.0.
     - "brand_archetype_summary": An object with "acquirer_archetype" and "target_archetype" strings. Deduce these from their 'acquirer_profile' and 'target_profile'.
     - "corporate_ethos_summary": An object with "acquirer_ethos" and "target_ethos" strings. Synthesize a sharp, comparative analysis of each company's leadership, values, and work culture based on their 'acquirer_culture_profile' and 'target_culture_profile'.
     - "financial_synthesis": A string providing a comparative summary of the two companies' financial health and market positioning based on their respective financial profiles.
-    - "strategic_summary": A string providing a concise, executive-level overview of all findings, combining brand, corporate, and financial insights into a final recommendation.
+    - "strategic_summary": A string providing a concise, executive-level overview of all findings, combining brand, corporate, and financial insights into a final recommendation. If cultural data seems missing, mention this as a potential risk.
 
-    Return ONLY the final JSON object.
+    Return ONLY the final JSON object containing these text-based summaries. Do NOT include any scores.
     """
     
     try:
         response = await model.generate_content_async(prompt, generation_config={"response_mime_type": "application/json"})
-        report = json.loads(response.text)
-        # Use the safe conversion helper here as well
-        report['cultural_compatibility_score'] = _safe_float(report.get('cultural_compatibility_score'))
-        report['affinity_overlap_score'] = _safe_float(report.get('affinity_overlap_score'))
-        return report
+        report_from_llm = json.loads(response.text)
+        
+        # --- Part 3: Merge deterministic scores with LLM summaries ---
+        final_report = {
+            "cultural_compatibility_score": cultural_score,
+            "affinity_overlap_score": affinity_score,
+            **report_from_llm
+        }
+        return final_report
+        
     except Exception as e:
         logger.error(f"Final report synthesis failed: {e}")
         return {
             "strategic_summary": "Analysis failed during final synthesis. Key data may be missing.",
-            "cultural_compatibility_score": 0.0,
-            "affinity_overlap_score": _safe_float(agent_data.get('qloo_analysis', {}).get('affinity_overlap_score')),
+            "cultural_compatibility_score": cultural_score,
+            "affinity_overlap_score": affinity_score,
             "brand_archetype_summary": {"acquirer_archetype": "N/A", "target_archetype": "N/A"},
             "corporate_ethos_summary": {"acquirer_ethos": "N/A", "target_ethos": "N/A"},
             "financial_synthesis": "N/A"
@@ -1097,6 +1134,8 @@ async def generate_full_report_stream(report_id: uuid.UUID, payload: ReportGener
             if raw_status in ["action", "observation", "thinking"]: return ""
             event_data = {"payload": data.get("payload")}
             if raw_status == "source": event_data['status'] = 'source'
+            # THE FIX: Add the new event type for Qloo insights.
+            elif raw_status == "qloo_insight": event_data['status'] = 'qloo_insight'; event_data['message'] = 'Qloo analysis complete.'
             elif raw_status == "thought": event_data['status'] = 'reasoning'; event_data['message'] = data.get("message", "").replace('**Thought**:', '').strip()
             elif raw_status == "complete": return "" 
             elif raw_status == "error": event_data['status'] = 'error'; event_data['message'] = data.get("message")
@@ -1141,7 +1180,6 @@ async def generate_full_report_stream(report_id: uuid.UUID, payload: ReportGener
 
             yield f"data: {json.dumps({'status': 'saving', 'message': 'Saving final analysis to database'})}\n\n"
             async with postgres_db.get_session() as save_session:
-                # Eagerly load relationships to ensure they are available for modification
                 stmt = select(models.Report).where(models.Report.id == report_id).options(
                     selectinload(models.Report.analysis),
                     selectinload(models.Report.culture_clashes),
@@ -1153,24 +1191,19 @@ async def generate_full_report_stream(report_id: uuid.UUID, payload: ReportGener
                 if not save_report:
                     raise Exception("Report not found during save operation.")
                 
-                logger.info(f"Report {report_id}: Replacing analysis and child collections.")
-
-                # This is a robust way to replace related objects.
-                # By assigning a new object/list to the relationship attribute,
-                # SQLAlchemy's `delete-orphan` cascade handles the removal of old items.
+                # Assign the analysis object with data from the LLM summary
                 save_report.analysis = models.ReportAnalysis(
                     report_id=save_report.id, 
-                    # THE FIX: Use the safe float conversion for all float fields
                     cultural_compatibility_score=_safe_float(final_report_summary.get('cultural_compatibility_score')),
                     affinity_overlap_score=_safe_float(final_report_summary.get('affinity_overlap_score')),
                     brand_archetype_summary=json.dumps(final_report_summary.get('brand_archetype_summary', {})),
                     corporate_ethos_summary=json.dumps(final_report_summary.get('corporate_ethos_summary', {})),
                     strategic_summary=final_report_summary.get('strategic_summary', 'Analysis failed.'),
                     financial_synthesis=final_report_summary.get('financial_synthesis', 'Analysis failed.'),
-                    acquirer_corporate_profile=agent_final_data.get('acquirer_culture_profile') or "",
-                    target_corporate_profile=agent_final_data.get('target_culture_profile') or "",
-                    acquirer_financial_profile=agent_final_data.get('acquirer_financial_profile') or "",
-                    target_financial_profile=agent_final_data.get('target_financial_profile') or "",
+                    acquirer_corporate_profile=str(agent_final_data.get('acquirer_culture_profile') or ""),
+                    target_corporate_profile=str(agent_final_data.get('target_culture_profile') or ""),
+                    acquirer_financial_profile=str(agent_final_data.get('acquirer_financial_profile') or ""),
+                    target_financial_profile=str(agent_final_data.get('target_financial_profile') or ""),
                     search_sources=agent.all_sources.get('search_sources', []),
                     acquirer_sources=agent.all_sources.get('acquirer_sources', []),
                     target_sources=agent.all_sources.get('target_sources', []),
@@ -1180,17 +1213,20 @@ async def generate_full_report_stream(report_id: uuid.UUID, payload: ReportGener
                     target_financial_sources=agent.all_sources.get('target_financial_sources', [])
                 )
 
+                # THE FIX: Directly assign clashes and growths from the agent's raw data.
+                # This ensures the deterministically generated lists are saved.
                 save_report.culture_clashes = [
-                    models.CultureClash(report_id=save_report.id, **clash) for clash in agent_final_data.get('culture_clashes', [])
+                    models.CultureClash(report_id=save_report.id, **clash) 
+                    for clash in agent_final_data.get('culture_clashes', [])
                 ]
                 save_report.untapped_growths = [
-                    models.UntappedGrowth(report_id=save_report.id, **growth) for growth in agent_final_data.get('untapped_growths', [])
+                    models.UntappedGrowth(report_id=save_report.id, **growth) 
+                    for growth in agent_final_data.get('untapped_growths', [])
                 ]
                 
                 save_report.status = models.ReportStatus.COMPLETED
                 save_session.add(save_report)
                 
-                logger.info(f"Report {report_id}: Committing final report to the database.")
                 await save_session.commit()
                 logger.success(f"Report {report_id}: Final report committed successfully.")
                 generation_succeeded = True
@@ -1225,6 +1261,12 @@ async def download_report_pdf(report_id: uuid.UUID, session: AsyncSession = Depe
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found or not complete.")
 
     try:
+        # Fetch favicons concurrently
+        acquirer_favicon_bytes, target_favicon_bytes = await asyncio.gather(
+            fetch_favicon_bytes(report.acquirer_brand),
+            fetch_favicon_bytes(report.target_brand)
+        )
+
         # Reconstruct the LLM summary payload for the PDF generator
         llm_summary = {
             "strategic_summary": report.analysis.strategic_summary,
@@ -1233,7 +1275,12 @@ async def download_report_pdf(report_id: uuid.UUID, session: AsyncSession = Depe
             "corporate_ethos": json.loads(report.analysis.corporate_ethos_summary) if report.analysis.corporate_ethos_summary else {}
         }
         
-        pdf_bytes = create_report_pdf(report, llm_summary)
+        pdf_bytes = create_report_pdf(
+            report, 
+            llm_summary,
+            acquirer_favicon_bytes,
+            target_favicon_bytes
+        )
         
         filename = f"Alloy_Report_{report.acquirer_brand}_vs_{report.target_brand}.pdf"
         headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
@@ -1243,19 +1290,38 @@ async def download_report_pdf(report_id: uuid.UUID, session: AsyncSession = Depe
         logger.error(f"Failed to generate PDF for report {report_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to generate PDF report.")
 
-@router.get("/", response_model=List[models.ReportRead])
+@router.get("")
 async def get_reports(session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
-    statement = select(models.Report).where(models.Report.user_id == current_user.id, models.Report.status != models.ReportStatus.DRAFT).order_by(models.Report.created_at).options(selectinload(models.Report.analysis), selectinload(models.Report.culture_clashes), selectinload(models.Report.untapped_growths))
+    statement = (
+        select(models.Report)
+        .where(
+            models.Report.user_id == current_user.id,
+            models.Report.status != models.ReportStatus.DRAFT,
+        )
+        .order_by(models.Report.created_at.desc())
+        .options(
+            selectinload(models.Report.analysis),
+            selectinload(models.Report.culture_clashes),
+            selectinload(models.Report.untapped_growths),
+        )
+    )
     result = await session.execute(statement)
-    return list(result.scalars().all())
+    db_reports = result.scalars().all()
+    
+    pydantic_reports = [models.ReportRead.model_validate(report) for report in db_reports]
+    return [report.model_dump() for report in pydantic_reports]
 
-@router.get("/{report_id}", response_model=models.ReportRead)
+
+@router.get("/{report_id}")
 async def get_report(report_id: uuid.UUID, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     statement = select(models.Report).where(models.Report.id == report_id, models.Report.user_id == current_user.id).options(selectinload(models.Report.analysis), selectinload(models.Report.culture_clashes), selectinload(models.Report.untapped_growths))
     result = await session.execute(statement)
     report = result.scalar_one_or_none()
     if not report or (report.status == models.ReportStatus.DRAFT and report.user_id != current_user.id): raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found")
-    return report
+
+    pydantic_report = models.ReportRead.model_validate(report)
+    return pydantic_report.model_dump()
+
 
 @router.delete("/{report_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_report(report_id: uuid.UUID, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
@@ -1497,23 +1563,32 @@ async def intelligent_cultural_analysis_tool(acquirer_brand_name: str, target_br
 
     if not aggregated_acquirer_tastes or not aggregated_target_tastes:
         error_msg = "Error: Could not retrieve any taste data from Qloo for the brands or their cultural products."
+        logger.error(error_msg)
         return {"context_str": error_msg, "culture_clashes": [], "untapped_growths": []}
     
     # 4. Perform comparison on aggregated sets
     shared_tastes = list(aggregated_acquirer_tastes.intersection(aggregated_target_tastes))
     union_size = len(aggregated_acquirer_tastes.union(aggregated_target_tastes))
     unique_to_acquirer = list(aggregated_acquirer_tastes - aggregated_target_tastes)
-    unique_to_target = list(aggregated_target_tastes - aggregated_target_tastes)
+    # CORE FIX: The logic here was bugged, subtracting a set from itself.
+    unique_to_target = list(aggregated_target_tastes - aggregated_acquirer_tastes)
 
     culture_clashes = []
     for interest in unique_to_acquirer[:5]:
-        culture_clashes.append({"topic": interest, "description": "The acquirer's audience ecosystem shows a strong affinity for this, a taste not shared by the target's.", "severity": "MEDIUM"})
+        culture_clashes.append({"topic": interest, "description": "The Acquirer's audience ecosystem shows a strong affinity for this, a taste not shared by the Target's.", "severity": "MEDIUM"})
     for interest in unique_to_target[:5]:
-        culture_clashes.append({"topic": interest, "description": "The target's audience ecosystem shows a strong affinity for this, a taste not shared by the acquirer's.", "severity": "HIGH"})
+        culture_clashes.append({"topic": interest, "description": "The Target's audience ecosystem shows a strong affinity for this, a taste not shared by the Acquirer's.", "severity": "HIGH"})
         
     untapped_growths = []
     for interest in shared_tastes[:5]:
         untapped_growths.append({"description": f"Both audience ecosystems show a strong affinity for '{interest}'. This shared passion could be a key pillar for joint marketing campaigns.", "potential_impact_score": 8})
+
+    # THE FIX: Add a new key to the return value specifically for streaming to the frontend.
+    qloo_insights_for_stream = {
+        "shared": shared_tastes[:5],
+        "acquirer_unique": unique_to_acquirer[:5],
+        "target_unique": unique_to_target[:5]
+    }
 
     # 5. Return the full analysis object
     return {
@@ -1524,6 +1599,7 @@ async def intelligent_cultural_analysis_tool(acquirer_brand_name: str, target_br
             "target_unique_tastes_top_5": unique_to_target[:5],
             "analysis_proxies": {"acquirer": acquirer_search_terms, "target": target_search_terms}
         }),
+        "qloo_insights_for_stream": qloo_insights_for_stream,
         "culture_clashes": culture_clashes,
         "untapped_growths": untapped_growths,
         "sources": acquirer_profile_result.get('sources', []) + target_profile_result.get('sources', [])
@@ -1634,12 +1710,8 @@ class AlloyReActAgent:
             if not tool_name:
                 observation = "Error: Your action JSON is missing the 'tool_name' key."
             elif tool_name == "finish":
-                required_keys = ['acquirer_profile', 'target_profile', 'qloo_analysis', 'acquirer_culture_profile', 'target_culture_profile', 'acquirer_financial_profile', 'target_financial_profile']
-                for key in required_keys:
-                    if key not in self.gathered_data:
-                        self.gathered_data[key] = f"Data for '{key}' was not gathered."
-                
-                self.final_data = params.get("gathered_data", self.gathered_data)
+                # CORE FIX: The agent should pass its internally gathered data to the finish tool.
+                self.final_data = self.gathered_data
                 yield {"status": "complete"}
                 return
             elif tool_name not in self.tools:
@@ -1650,20 +1722,19 @@ class AlloyReActAgent:
                     observation = tool_result.get('context_str', f"Tool {tool_name} ran but provided no context.")
                     sources = tool_result.get('sources', [])
                     
-                    search_string = " ".join(str(v) for v in params.values()).lower()
-                    is_acquirer = self.acquirer_brand.lower() in search_string
-                    is_target = self.target_brand.lower() in search_string
+                    # CORE FIX: Explicitly check params to determine the target and data key.
+                    # This is far more robust than parsing the query string.
+                    brand_name_param = params.get('brand_name') or params.get('acquirer_brand_name')
+                    is_acquirer = brand_name_param == self.acquirer_brand
+                    is_target = brand_name_param == self.target_brand
                     
-                    # More robust check
-                    if 'brand_name' in params and params['brand_name'] == self.acquirer_brand: is_acquirer = True
-                    if 'brand_name' in params and params['brand_name'] == self.target_brand: is_target = True
-
                     if tool_name == "web_search":
-                        if is_acquirer and not is_target:
+                        if is_acquirer:
                             self.completed_steps.add("searched_acquirer_profile")
                             self.gathered_data['acquirer_profile'] = observation
                             self.all_sources['acquirer_sources'].extend(sources)
-                        elif is_target and not is_acquirer:
+                        # The query could be for the target brand
+                        elif self.target_brand in params.get('query', ''):
                             self.completed_steps.add("searched_target_profile")
                             self.gathered_data['target_profile'] = observation
                             self.all_sources['target_sources'].extend(sources)
@@ -1691,6 +1762,14 @@ class AlloyReActAgent:
                     elif tool_name == "intelligent_cultural_analysis_tool":
                         self.completed_steps.add("performed_intelligent_qloo_analysis")
                         self.all_sources['search_sources'].extend(sources) # Add sources from proxy search
+                        
+                        # THE FIX: If the tool provides specific insights for streaming, yield them now.
+                        if 'qloo_insights_for_stream' in tool_result:
+                            yield {
+                                "status": "qloo_insight",
+                                "payload": tool_result['qloo_insights_for_stream']
+                            }
+                        
                         try:
                             self.gathered_data['qloo_analysis'] = json.loads(observation)
                             self.gathered_data['culture_clashes'] = tool_result.get('culture_clashes', [])
@@ -1795,10 +1874,11 @@ from datetime import datetime
 import io
 import json
 from loguru import logger
+from typing import Optional
 
 from src.db import models
 from src.core.settings import get_settings
-from src.services.pdf_template import (
+from src.services.pdf_layouts import (
     get_pdf_styles,
     create_header,
     create_title_section,
@@ -1806,14 +1886,20 @@ from src.services.pdf_template import (
     create_corporate_culture_section,
     create_financial_analysis_section,
     create_clashes_table,
-    create_growth_table
+    create_growth_table,
+    create_brand_archetypes_section
 )
 
 settings = get_settings()
 genai.configure(api_key=settings.GEMINI_API_KEY)
 
 
-def create_report_pdf(report: models.Report, llm_summary: dict) -> bytes:
+def create_report_pdf(
+    report: models.Report, 
+    llm_summary: dict,
+    acquirer_favicon_bytes: Optional[bytes],
+    target_favicon_bytes: Optional[bytes]
+) -> bytes:
     """
     Assembles the PDF from static templates and LLM-generated content using reportlab.
     """
@@ -1824,13 +1910,15 @@ def create_report_pdf(report: models.Report, llm_summary: dict) -> bytes:
                             rightMargin=0.75*inch,
                             leftMargin=0.75*inch,
                             topMargin=0.75*inch,
-                            bottomMargin=1.0*inch)
+                            bottomMargin=1.0*inch,
+                            title=report.title) # Set the document title metadata
     
     styles = get_pdf_styles()
     story = []
 
     story.extend(create_header(styles))
-    story.extend(create_title_section(report, styles))
+    # THE FIX: Pass the favicon bytes to the title section layout function.
+    story.extend(create_title_section(report, styles, acquirer_favicon_bytes, target_favicon_bytes))
     story.extend(create_key_metrics_table(report, doc.width, styles))
     
     # --- Main Qualitative Summaries ---
@@ -1840,16 +1928,8 @@ def create_report_pdf(report: models.Report, llm_summary: dict) -> bytes:
     
     # Add the new sections
     story.extend(create_financial_analysis_section(llm_summary, styles))
-    story.extend(create_corporate_culture_section(report, llm_summary, doc.width, styles))
-
-    story.append(Paragraph("Brand Archetypes", styles['h2']))
-    archetypes = llm_summary.get("brand_archetypes", {})
-    story.append(Paragraph(report.acquirer_brand, styles['h3']))
-    story.append(Paragraph(archetypes.get('acquirer', 'N/A'), styles['default']))
-    story.append(Spacer(1, 0.1*inch))
-    story.append(Paragraph(report.target_brand, styles['h3']))
-    story.append(Paragraph(archetypes.get('target', 'N/A'), styles['default']))
-    story.append(Spacer(1, 0.3*inch))
+    story.extend(create_corporate_culture_section(report, llm_summary, doc.width, styles, acquirer_favicon_bytes, target_favicon_bytes))
+    story.extend(create_brand_archetypes_section(report, llm_summary, styles, acquirer_favicon_bytes, target_favicon_bytes))
 
     # --- Detailed Data Tables ---
     story.extend(create_clashes_table(report, doc.width, styles))
@@ -1869,162 +1949,6 @@ def create_report_pdf(report: models.Report, llm_summary: dict) -> bytes:
     buffer.close()
     logger.success(f"Successfully assembled PDF for report {report.id}.")
     return pdf_bytes-e 
--e
-
-File: backend/src/services/pdf_template.py
-from reportlab.platypus import Paragraph, Spacer, Table, TableStyle
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib import colors
-from reportlab.lib.units import inch
-from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
-
-def get_pdf_styles():
-    """Returns a dictionary of styled reportlab ParagraphStyle objects."""
-    base_styles = getSampleStyleSheet()
-    styles = {
-        'default': ParagraphStyle(name='default', fontName='Helvetica', fontSize=10, leading=14),
-        'h1': ParagraphStyle(name='h1', fontName='Helvetica-Bold', fontSize=20, alignment=TA_CENTER, spaceAfter=6),
-        'h2': ParagraphStyle(name='h2', fontName='Helvetica-Bold', fontSize=14, spaceAfter=12, textColor=colors.HexColor('#0d47a1')),
-        'h3': ParagraphStyle(name='h3', fontName='Helvetica-Bold', fontSize=11, spaceAfter=6),
-        'center': ParagraphStyle(name='center', parent=base_styles['Normal'], alignment=TA_CENTER),
-        'right': ParagraphStyle(name='right', parent=base_styles['Normal'], alignment=TA_RIGHT),
-        'small_grey': ParagraphStyle(name='small_grey', fontSize=8, fontName='Helvetica', textColor=colors.grey),
-    }
-    styles['center_bold'] = ParagraphStyle(name='center_bold', parent=styles['center'], fontName='Helvetica-Bold')
-    return styles
-
-def create_header(styles):
-    """Creates the header section of the PDF."""
-    return [
-        Paragraph("Alloy - Cultural Due Diligence Report", styles['right']),
-        Spacer(1, 0.1 * inch)
-    ]
-
-def create_title_section(report, styles):
-    """Creates the main title section of the PDF."""
-    return [
-        Paragraph(report.title, styles['h1']),
-        Paragraph(f"<i>Generated: {report.created_at.strftime('%B %d, %Y')}</i>", styles['center']),
-        Spacer(1, 0.3 * inch)
-    ]
-
-def create_key_metrics_table(report, doc_width, styles):
-    """Creates the top-line metrics table."""
-    score_data = [
-        [
-            Paragraph(f"<font size=24>{report.analysis.cultural_compatibility_score:.0f}</font>/100", styles['center']),
-            Paragraph(f"<font size=24>{report.analysis.affinity_overlap_score:.1f}%</font>", styles['center'])
-        ],
-        [
-            Paragraph("<b>Cultural Compatibility Score</b>", styles['center_bold']),
-            Paragraph("<b>Audience Affinity Overlap</b>", styles['center_bold'])
-        ]
-    ]
-    table = Table(score_data, colWidths=[doc_width / 2.0, doc_width / 2.0], rowHeights=0.6 * inch)
-    table.setStyle(TableStyle([
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('BOX', (0, 0), (-1, -1), 1, colors.darkgrey),
-        ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.lightgrey),
-    ]))
-    return [table, Spacer(1, 0.3 * inch)]
-
-def create_corporate_culture_section(report, llm_summary, doc_width, styles):
-    """Creates the corporate culture analysis section."""
-    corporate_ethos = llm_summary.get("corporate_ethos", {})
-    acquirer_ethos_text = corporate_ethos.get('acquirer_ethos', '')
-    target_ethos_text = corporate_ethos.get('target_ethos', '')
-
-    if not acquirer_ethos_text and not target_ethos_text:
-        return []
-
-    acquirer_ethos = acquirer_ethos_text.replace('\n', '<br/>')
-    target_ethos = target_ethos_text.replace('\n', '<br/>')
-
-    story = []
-    story.append(Paragraph("Corporate Culture & Ethos", styles['h2']))
-    
-    ethos_data = [
-        [Paragraph(f"<b>{report.acquirer_brand}</b>", styles['h3']), Paragraph(f"<b>{report.target_brand}</b>", styles['h3'])],
-        [Paragraph(acquirer_ethos, styles['default']), Paragraph(target_ethos, styles['default'])]
-    ]
-    ethos_table = Table(ethos_data, colWidths=[doc_width / 2.0 - 5, doc_width / 2.0 - 5])
-    ethos_table.setStyle(TableStyle([
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('BOX', (0, 0), (-1, -1), 1, colors.lightgrey),
-        ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.lightgrey),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-    ]))
-    return [ethos_table, Spacer(1, 0.3*inch)]
-
-def create_financial_analysis_section(llm_summary, styles):
-    """Creates the financial and market analysis summary section."""
-    financial_synthesis = llm_summary.get("financial_synthesis", "")
-    if not financial_synthesis:
-        return []
-    
-    story = []
-    story.append(Paragraph("Financial & Market Analysis", styles['h2']))
-    story.append(Paragraph(financial_synthesis.replace('\n', '<br/>'), styles['default']))
-    story.append(Spacer(1, 0.3 * inch))
-    return story
-
-def create_clashes_table(report, doc_width, styles):
-    """Creates the culture clashes table."""
-    if not report.culture_clashes:
-        return []
-        
-    header = Paragraph("Potential Culture Clashes", styles['h2'])
-    
-    data = [['Topic', 'Description', 'Severity']]
-    for clash in report.culture_clashes:
-        data.append([
-            Paragraph(clash.topic, styles['default']),
-            Paragraph(clash.description, styles['default']),
-            Paragraph(clash.severity.value, styles['default'])
-        ])
-        
-    table = Table(data, colWidths=[doc_width * 0.2, doc_width * 0.6, doc_width * 0.2])
-    table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#263238')), 
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 10),
-        ('TOPPADDING', (0, 0), (-1, 0), 10),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.HexColor('#f5f5f5'), colors.white]),
-        ('GRID', (0, 0), (-1, -1), 1, colors.lightgrey)
-    ]))
-    return [header, table, Spacer(1, 0.3 * inch)]
-
-def create_growth_table(report, doc_width, styles):
-    """Creates the untapped growth opportunities table."""
-    if not report.untapped_growths:
-        return []
-
-    header = Paragraph("Untapped Growth Opportunities", styles['h2'])
-
-    data = [['Opportunity', 'Potential Impact']]
-    for growth in report.untapped_growths:
-        data.append([
-            Paragraph(growth.description, styles['default']),
-            Paragraph(f"<b>{growth.potential_impact_score}/10</b>", styles['center'])
-        ])
-
-    table = Table(data, colWidths=[doc_width * 0.8, doc_width * 0.2])
-    table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#004d40')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 10),
-        ('TOPPADDING', (0, 0), (-1, 0), 10),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.HexColor('#f5f5f5'), colors.white]),
-        ('GRID', (0, 0), (-1, -1), 1, colors.lightgrey)
-    ]))
-    return [header, table, Spacer(1, 0.3 * inch)]-e 
 -e
 
 File: backend/src/services/report_generator.py
@@ -2211,6 +2135,217 @@ async def find_official_website(brand_name: str) -> Optional[str]:
              return None
         logger.error(f"An error occurred during Gemini website search for '{brand_name}': {e}")
         return None-e 
+-e
+
+File: backend/src/services/pdf_layouts.py
+from reportlab.platypus import Paragraph, Spacer, Table, TableStyle, Image, Flowable
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib import colors
+from reportlab.lib.units import inch
+from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+from typing import Optional, List
+import io
+
+def get_pdf_styles():
+    """Returns a dictionary of styled reportlab ParagraphStyle objects."""
+    base_styles = getSampleStyleSheet()
+    styles = {
+        'default': ParagraphStyle(name='default', fontName='Helvetica', fontSize=10, leading=14),
+        'h1': ParagraphStyle(name='h1', fontName='Helvetica-Bold', fontSize=20, alignment=TA_CENTER, spaceAfter=6),
+        'h2': ParagraphStyle(name='h2', fontName='Helvetica-Bold', fontSize=14, spaceAfter=12, textColor=colors.HexColor('#0d47a1')),
+        'h3': ParagraphStyle(name='h3', fontName='Helvetica-Bold', fontSize=11, spaceAfter=6),
+        'center': ParagraphStyle(name='center', parent=base_styles['Normal'], alignment=TA_CENTER),
+        'right': ParagraphStyle(name='right', parent=base_styles['Normal'], alignment=TA_RIGHT),
+        'small_grey': ParagraphStyle(name='small_grey', fontSize=8, fontName='Helvetica', textColor=colors.grey),
+    }
+    styles['center_bold'] = ParagraphStyle(name='center_bold', parent=styles['center'], fontName='Helvetica-Bold')
+    return styles
+
+def _create_brand_header_flowable(brand_name: str, favicon_bytes: Optional[bytes], style: ParagraphStyle) -> List[Flowable]:
+    """Creates a list of Flowables (Image + Text) for a brand header."""
+    content = []
+    if favicon_bytes:
+        try:
+            img = Image(io.BytesIO(favicon_bytes), width=12, height=12)
+            img.hAlign = 'LEFT'
+            content.append(img)
+        except Exception: # Handle potential PIL errors for invalid image data
+            pass
+    content.append(Paragraph(f"<b>{brand_name}</b>", style))
+    
+    # Use a tiny table to force horizontal alignment
+    table = Table([content], colWidths=[14, None])
+    table.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 0),
+        ('RIGHTPADDING', (0, 0), (0, 0), 2),
+    ]))
+    return [table]
+
+def create_header(styles):
+    """Creates the header section of the PDF."""
+    return [
+        Paragraph("Alloy - Cultural Due Diligence Report", styles['right']),
+        Spacer(1, 0.1 * inch)
+    ]
+
+def create_title_section(report, styles, acquirer_favicon_bytes, target_favicon_bytes):
+    """Creates the main title section of the PDF, now with favicons."""
+    title_paragraph = Paragraph(report.title, styles['h1'])
+    
+    acquirer_image = Image(io.BytesIO(acquirer_favicon_bytes), width=24, height=24) if acquirer_favicon_bytes else Spacer(24, 24)
+    target_image = Image(io.BytesIO(target_favicon_bytes), width=24, height=24) if target_favicon_bytes else Spacer(24, 24)
+
+    title_data = [[acquirer_image, title_paragraph, target_image]]
+    
+    title_table = Table(title_data, colWidths=[0.5*inch, None, 0.5*inch])
+    title_table.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('ALIGN', (0, 0), (0, 0), 'CENTER'),
+        ('ALIGN', (2, 0), (2, 0), 'CENTER'),
+    ]))
+
+    return [
+        title_table,
+        Paragraph(f"<i>Generated: {report.created_at.strftime('%B %d, %Y')}</i>", styles['center']),
+        Spacer(1, 0.3 * inch)
+    ]
+
+def create_key_metrics_table(report, doc_width, styles):
+    """Creates the top-line metrics table."""
+    cultural_score_display = f"<font size=24>{report.analysis.cultural_compatibility_score:.0f}</font>/100" if report.analysis.cultural_compatibility_score > 0 else "<font size=24>--</font>/100"
+    affinity_score_display = f"<font size=24>{report.analysis.affinity_overlap_score:.1f}%</font>" if report.analysis.affinity_overlap_score > 0 else "<font size=24>--</font>%"
+    
+    score_data = [
+        [
+            Paragraph(cultural_score_display, styles['center']),
+            Paragraph(affinity_score_display, styles['center'])
+        ],
+        [
+            Paragraph("<b>Cultural Compatibility Score</b>", styles['center_bold']),
+            Paragraph("<b>Audience Affinity Overlap</b>", styles['center_bold'])
+        ]
+    ]
+    table = Table(score_data, colWidths=[doc_width / 2.0, doc_width / 2.0], rowHeights=0.6 * inch)
+    table.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('BOX', (0, 0), (-1, -1), 1, colors.darkgrey),
+        ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.lightgrey),
+    ]))
+    return [table, Spacer(1, 0.3 * inch)]
+
+def create_corporate_culture_section(report, llm_summary, doc_width, styles, acquirer_favicon_bytes, target_favicon_bytes):
+    """Creates the corporate culture analysis section with favicons."""
+    corporate_ethos = llm_summary.get("corporate_ethos", {})
+    acquirer_ethos_text = corporate_ethos.get('acquirer_ethos', '')
+    target_ethos_text = corporate_ethos.get('target_ethos', '')
+
+    if not acquirer_ethos_text and not target_ethos_text:
+        return []
+
+    acquirer_ethos = acquirer_ethos_text.replace('\n', '<br/>')
+    target_ethos = target_ethos_text.replace('\n', '<br/>')
+
+    story = []
+    story.append(Paragraph("Corporate Culture & Ethos", styles['h2']))
+    
+    ethos_data = [
+        [_create_brand_header_flowable(report.acquirer_brand, acquirer_favicon_bytes, styles['h3']),
+         _create_brand_header_flowable(report.target_brand, target_favicon_bytes, styles['h3'])],
+        [Paragraph(acquirer_ethos, styles['default']), Paragraph(target_ethos, styles['default'])]
+    ]
+    ethos_table = Table(ethos_data, colWidths=[doc_width / 2.0 - 5, doc_width / 2.0 - 5])
+    ethos_table.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('BOX', (0, 0), (-1, -1), 1, colors.lightgrey),
+        ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.lightgrey),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+    ]))
+    return [ethos_table, Spacer(1, 0.3*inch)]
+
+def create_brand_archetypes_section(report, llm_summary, styles, acquirer_favicon_bytes, target_favicon_bytes):
+    """Creates the brand archetypes section with favicons."""
+    story = []
+    archetypes = llm_summary.get("brand_archetypes", {})
+    
+    story.append(Paragraph("Brand Archetypes", styles['h2']))
+    story.extend(_create_brand_header_flowable(report.acquirer_brand, acquirer_favicon_bytes, styles['h3']))
+    story.append(Paragraph(archetypes.get('acquirer_archetype', 'N/A'), styles['default']))
+    story.append(Spacer(1, 0.1*inch))
+    story.extend(_create_brand_header_flowable(report.target_brand, target_favicon_bytes, styles['h3']))
+    story.append(Paragraph(archetypes.get('target_archetype', 'N/A'), styles['default']))
+    story.append(Spacer(1, 0.3*inch))
+    return story
+
+def create_financial_analysis_section(llm_summary, styles):
+    """Creates the financial and market analysis summary section."""
+    financial_synthesis = llm_summary.get("financial_synthesis", "")
+    if not financial_synthesis:
+        return []
+    
+    story = []
+    story.append(Paragraph("Financial & Market Analysis", styles['h2']))
+    story.append(Paragraph(financial_synthesis.replace('\n', '<br/>'), styles['default']))
+    story.append(Spacer(1, 0.3 * inch))
+    return story
+
+def create_clashes_table(report, doc_width, styles):
+    """Creates the culture clashes table."""
+    if not report.culture_clashes:
+        return []
+        
+    header = Paragraph("Potential Culture Clashes", styles['h2'])
+    
+    data = [['Topic', 'Description', 'Severity']]
+    for clash in report.culture_clashes:
+        data.append([
+            Paragraph(clash.topic, styles['default']),
+            Paragraph(clash.description, styles['default']),
+            Paragraph(clash.severity.value, styles['default'])
+        ])
+        
+    table = Table(data, colWidths=[doc_width * 0.2, doc_width * 0.6, doc_width * 0.2])
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#263238')), 
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 10),
+        ('TOPPADDING', (0, 0), (-1, 0), 10),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.HexColor('#f5f5f5'), colors.white]),
+        ('GRID', (0, 0), (-1, -1), 1, colors.lightgrey)
+    ]))
+    return [header, table, Spacer(1, 0.3 * inch)]
+
+def create_growth_table(report, doc_width, styles):
+    """Creates the untapped growth opportunities table."""
+    if not report.untapped_growths:
+        return []
+
+    header = Paragraph("Untapped Growth Opportunities", styles['h2'])
+
+    data = [['Opportunity', 'Potential Impact']]
+    for growth in report.untapped_growths:
+        data.append([
+            Paragraph(growth.description, styles['default']),
+            Paragraph(f"<b>{growth.potential_impact_score}/10</b>", styles['center'])
+        ])
+
+    table = Table(data, colWidths=[doc_width * 0.8, doc_width * 0.2])
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#004d40')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 10),
+        ('TOPPADDING', (0, 0), (-1, 0), 10),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.HexColor('#f5f5f5'), colors.white]),
+        ('GRID', (0, 0), (-1, -1), 1, colors.lightgrey)
+    ]))
+    return [header, table, Spacer(1, 0.3 * inch)]-e 
 -e
 
 File: backend/tests/conftest.py
@@ -3373,10 +3508,10 @@ const StatusBadge = ({ status }: { status: Report['status'] }) => {
 export default function ReportsPage() {
     const { accessToken } = useAuth();
     const { data: reports, error, mutate, isLoading } = useSWR(
-        accessToken ? [`/api/v1/reports/`, accessToken] : null,
+        accessToken ? [`/api/v1/reports`, accessToken] : null,
         ([url, token]) => fetcher(url, token)
     );
-    const { trigger: triggerDelete } = useSWRMutation(`/api/v1/reports/`, deleteReport);
+    const { trigger: triggerDelete } = useSWRMutation(`/api/v1/reports`, deleteReport);
 
     const handleDelete = async (reportId: string) => {
         toast.info("Deleting report...");
@@ -7554,6 +7689,7 @@ import { ChartContainer } from "../ui/chart";
 import { ScrollArea } from "../ui/scroll-area";
 import { cn } from "@/lib/utils";
 import React, { useMemo } from "react";
+import ReactMarkdown from "react-markdown";
 
 interface ReportViewProps {
   report: Report;
@@ -7846,7 +7982,7 @@ const FinancialAnalysis = ({ report }: { report: Report }) => {
                         <CardTitle>Acquirer Financial Profile</CardTitle>
                         <CardDescription>Raw intelligence gathered on {report.acquirer_brand}.</CardDescription>
                     </CardHeader>
-                    <CardContent className="space-y-4"><ScrollArea className="h-48"><p className="text-sm text-muted-foreground whitespace-pre-wrap">{analysis.acquirer_financial_profile || "No data found."}</p></ScrollArea>
+                    <CardContent className="space-y-4"><ScrollArea className="h-48"><p className="text-sm text-muted-foreground whitespace-pre-wrap"><ReactMarkdown>{analysis.acquirer_financial_profile || "No data found."}</ReactMarkdown></p></ScrollArea>
                         {analysis.acquirer_financial_sources && analysis.acquirer_financial_sources.length > 0 && <div><h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">Sources</h4><div className="flex flex-wrap gap-2">{analysis.acquirer_financial_sources.map(s => <SourcePill key={s.url} url={s.url} />)}</div></div>}
                     </CardContent>
                 </Card>
@@ -7855,7 +7991,7 @@ const FinancialAnalysis = ({ report }: { report: Report }) => {
                         <CardTitle>Target Financial Profile</CardTitle>
                         <CardDescription>Raw intelligence gathered on {report.target_brand}.</CardDescription>
                     </CardHeader>
-                    <CardContent className="space-y-4"><ScrollArea className="h-48"><p className="text-sm text-muted-foreground whitespace-pre-wrap">{analysis.target_financial_profile || "No data found."}</p></ScrollArea>
+                    <CardContent className="space-y-4"><ScrollArea className="h-48"><p className="text-sm text-muted-foreground whitespace-pre-wrap"><ReactMarkdown>{analysis.target_financial_profile || "No data found."}</ReactMarkdown></p></ScrollArea>
                         {analysis.target_financial_sources && analysis.target_financial_sources.length > 0 && <div><h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">Sources</h4><div className="flex flex-wrap gap-2">{analysis.target_financial_sources.map(s => <SourcePill key={s.url} url={s.url} />)}</div></div>}
                     </CardContent>
                 </Card>
@@ -8685,7 +8821,7 @@ File: web/src/components/global/PromptInputBox.tsx
 
 import React, { useState, useRef, useEffect } from "react";
 import * as TooltipPrimitive from "@radix-ui/react-tooltip";
-import { ArrowUp, Paperclip, X, Search, Bot, Database, BrainCircuit, CheckCircle, AlertTriangle, Link as LinkIcon, Sparkles, Loader2, Microscope, MessageSquareQuote } from "lucide-react";
+import { ArrowUp, Paperclip, X, Search, Bot, Database, BrainCircuit, CheckCircle, AlertTriangle, Link as LinkIcon, Sparkles, Loader2, Microscope, MessageSquareQuote, Zap, TrendingUp } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -8700,6 +8836,7 @@ import { Label } from "../ui/label";
 import Image from "next/image";
 import Link from "next/link";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../ui/collapsible";
+import { Separator } from "../ui/separator";
 
 // API MUTATION
 const createDraftReport = async (url: string, { arg }: { arg: { token: string }}) => {
@@ -8711,7 +8848,7 @@ const createDraftReport = async (url: string, { arg }: { arg: { token: string }}
 // TYPES
 interface Step {
   id: string;
-  status: 'info' | 'search' | 'source' | 'analysis' | 'reasoning' | 'synthesis' | 'saving' | 'complete' | 'error';
+  status: 'info' | 'search' | 'source' | 'analysis' | 'reasoning' | 'synthesis' | 'saving' | 'complete' | 'error' | 'qloo_insight';
   message?: string;
   payload?: any;
 }
@@ -8721,6 +8858,12 @@ interface UploadedFileStatus {
     name: string;
     status: 'uploading' | 'success' | 'error';
     message?: string;
+}
+
+interface QlooInsights {
+    shared: string[];
+    acquirer_unique: string[];
+    target_unique: string[];
 }
 
 interface PromptInputBoxProps {
@@ -8738,6 +8881,32 @@ const TooltipContent = React.forwardRef<React.ElementRef<typeof TooltipPrimitive
   <TooltipPrimitive.Content ref={ref} sideOffset={sideOffset} className={cn("z-50 overflow-hidden rounded-md border border-border bg-popover px-3 py-1.5 text-sm text-popover-foreground shadow-md animate-in fade-in-0", className)} {...props} />
 ));
 TooltipContent.displayName = TooltipPrimitive.Content.displayName;
+
+const QlooInsightsPanel = ({ insights, acquirer, target }: { insights: QlooInsights, acquirer: string, target: string }) => (
+    <motion.div
+        layout
+        initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+        className="p-4 my-3 rounded-lg border bg-accent/50"
+    >
+        <h3 className="font-semibold text-sm mb-3 text-foreground flex items-center gap-2"><Sparkles className="h-4 w-4 text-purple-400" />Qloo Cultural Insights</h3>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+                <h4 className="font-medium text-xs text-muted-foreground flex items-center gap-1.5 mb-2"><TrendingUp className="h-3 w-3 text-green-500" />Shared Affinities</h4>
+                <div className="space-y-1">{insights.shared.map(item => <p key={item} className="text-xs text-foreground truncate">{item}</p>)}</div>
+            </div>
+            <Separator orientation="vertical" className="hidden md:block" />
+            <div>
+                <h4 className="font-medium text-xs text-muted-foreground mb-2">{acquirer} Unique</h4>
+                <div className="space-y-1">{insights.acquirer_unique.map(item => <p key={item} className="text-xs text-foreground truncate">{item}</p>)}</div>
+            </div>
+             <div>
+                <h4 className="font-medium text-xs text-muted-foreground mb-2">{target} Unique</h4>
+                <div className="space-y-1">{insights.target_unique.map(item => <p key={item} className="text-xs text-foreground truncate">{item}</p>)}</div>
+            </div>
+        </div>
+    </motion.div>
+);
+
 
 const SourceItem = ({ source }: { source: { url: string, title?: string }}) => {
     const domain = new URL(source.url).hostname?.replace('www.', '');
@@ -8767,7 +8936,8 @@ const StepItem = ({ step }: { step: Step }) => {
         synthesis: <BrainCircuit className="h-4 w-4 text-amber-500" />,
         saving: <Database className="h-4 w-4 text-green-500" />,
         complete: <CheckCircle className="h-4 w-4 text-green-500" />,
-        error: <AlertTriangle className="h-4 w-4 text-destructive" />
+        error: <AlertTriangle className="h-4 w-4 text-destructive" />,
+        qloo_insight: <Sparkles className="h-4 w-4 text-purple-400"/>
     };
 
     const renderContent = () => {
@@ -8803,6 +8973,7 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
     
     const [logSteps, setLogSteps] = useState<Step[]>([]);
     const [sources, setSources] = useState<Step[]>([]);
+    const [qlooInsights, setQlooInsights] = useState<QlooInsights | null>(null);
     const [isGenerating, setIsGenerating] = useState(false);
     const [isCollapsibleOpen, setIsCollapsibleOpen] = useState(true);
 
@@ -8821,7 +8992,7 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
     }, [accessToken, draftReportId, triggerDraft, isGenerating]);
     
     useEffect(() => { onPristineChange(!acquirer && !target && !notes && !uploadedFile); }, [acquirer, target, notes, uploadedFile, onPristineChange]);
-    useEffect(() => { if (scrollAreaRef.current) scrollAreaRef.current.scrollTo({ top: scrollAreaRef.current.scrollHeight, behavior: 'smooth' }); }, [logSteps, sources]);
+    useEffect(() => { if (scrollAreaRef.current) scrollAreaRef.current.scrollTo({ top: scrollAreaRef.current.scrollHeight, behavior: 'smooth' }); }, [logSteps, sources, qlooInsights]);
 
     const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -8846,7 +9017,7 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
              toast.error("Invalid Input", { description: "Please provide full, official brand names."});
             return;
         }
-        setIsGenerating(true); setLogSteps([]); setSources([]); setIsCollapsibleOpen(true);
+        setIsGenerating(true); setLogSteps([]); setSources([]); setQlooInsights(null); setIsCollapsibleOpen(true);
         
         try {
             const response = await fetch(`${API_URL}/api/v1/reports/${draftReportId}/generate`, {
@@ -8870,6 +9041,7 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
                         const jsonData = JSON.parse(line.substring(6));
                         const newStep: Step = { id: `step-${Date.now()}-${Math.random()}`, ...jsonData };
                         if (newStep.status === 'source') { setSources(prev => [...prev, newStep]); } 
+                        else if (newStep.status === 'qloo_insight') { setQlooInsights(newStep.payload); setLogSteps(prev => [...prev, newStep]); }
                         else { setLogSteps(prev => [...prev, newStep]); }
                         
                         if (newStep.status === 'complete') {
@@ -8890,7 +9062,7 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
     };
     
     const handleReset = (resetId = true) => {
-        setIsGenerating(false); setLogSteps([]); setSources([]);
+        setIsGenerating(false); setLogSteps([]); setSources([]); setQlooInsights(null);
         setAcquirer(""); setTarget(""); setNotes(""); setUploadedFile(null);
         if (resetId) setDraftReportId(null);
     }
@@ -8904,11 +9076,11 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
                 <ScrollArea className="h-[30rem] max-h-[60vh] px-4" ref={scrollAreaRef}>
                     <div className="space-y-3 py-4">
                         <AnimatePresence>{logSteps.map((step) => <StepItem key={step.id} step={step} />)}</AnimatePresence>
+                        {qlooInsights && <QlooInsightsPanel insights={qlooInsights} acquirer={acquirer} target={target} />}
                         {sources.length > 0 && <Collapsible open={isCollapsibleOpen} onOpenChange={setIsCollapsibleOpen}>
                             <CollapsibleTrigger className="w-full p-2 rounded-md hover:bg-muted/50 text-left">
                                 <div className="flex items-center justify-between"><div className="flex items-center gap-2 overflow-hidden"><Search className="h-4 w-4 text-blue-500 flex-shrink-0"/><span className="text-sm font-medium">Found {sources.length} sources</span>
                                 <div className="flex items-center gap-1.5 flex-shrink min-w-0">
-                                    {/* CORE FIX: Remove framer-motion from the list mapping */}
                                     {sources.map(source => <FaviconPreview key={source.id} url={source.payload.url}/>)}
                                 </div>
                                 </div><span className="text-xs text-muted-foreground">{isCollapsibleOpen ? 'Collapse' : 'Expand'}</span></div>
@@ -9741,13 +9913,14 @@ backend/src
 │   ├── __pycache__
 │   │   ├── docling.cpython-313.pyc
 │   │   ├── pdf_generator.cpython-313.pyc
+│   │   ├── pdf_layouts.cpython-313.pyc
 │   │   ├── pdf_template.cpython-313.pyc
 │   │   ├── react_agent.cpython-313.pyc
 │   │   ├── report_generator.cpython-313.pyc
 │   │   └── search.cpython-313.pyc
 │   ├── docling.py
 │   ├── pdf_generator.py
-│   ├── pdf_template.py
+│   ├── pdf_layouts.py
 │   ├── react_agent.py
 │   ├── report_generator.py
 │   └── search.py
@@ -9756,7 +9929,7 @@ backend/src
     └── __pycache__
         └── __init__.cpython-313.pyc
 
-16 directories, 41 files
+16 directories, 42 files
 
 Backend Tests Tree:
 backend/tests

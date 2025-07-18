@@ -52,6 +52,29 @@ async def find_favicon_url(url: str, client: httpx.AsyncClient) -> Optional[str]
         return favicon_url
     return None
 
+async def fetch_favicon_bytes(brand_name: str) -> Optional[bytes]:
+    """Finds a brand's favicon and returns its raw bytes."""
+    logger.info(f"Fetching favicon bytes for PDF: '{brand_name}'")
+    try:
+        website_url = await find_official_website(brand_name)
+        if not website_url:
+            return None
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        async with httpx.AsyncClient(follow_redirects=True, headers=headers) as client:
+            favicon_url = await find_favicon_url(website_url, client)
+            if not favicon_url:
+                return None
+            
+            response = await client.get(favicon_url, timeout=10)
+            response.raise_for_status()
+            return response.content
+    except Exception as e:
+        logger.warning(f"Could not fetch favicon bytes for '{brand_name}': {e}")
+        return None
+
 @router.get("/favicon", response_class=RedirectResponse, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 async def get_favicon(
     url: Optional[str] = Query(None),

@@ -2,7 +2,7 @@
 
 import React, { useState, useRef, useEffect } from "react";
 import * as TooltipPrimitive from "@radix-ui/react-tooltip";
-import { ArrowUp, Paperclip, X, Search, Bot, Database, BrainCircuit, CheckCircle, AlertTriangle, Link as LinkIcon, Sparkles, Loader2, Microscope, MessageSquareQuote } from "lucide-react";
+import { ArrowUp, Paperclip, X, Search, Bot, Database, BrainCircuit, CheckCircle, AlertTriangle, Link as LinkIcon, Sparkles, Loader2, Microscope, MessageSquareQuote, Zap, TrendingUp } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -17,6 +17,7 @@ import { Label } from "../ui/label";
 import Image from "next/image";
 import Link from "next/link";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../ui/collapsible";
+import { Separator } from "../ui/separator";
 
 // API MUTATION
 const createDraftReport = async (url: string, { arg }: { arg: { token: string }}) => {
@@ -28,7 +29,7 @@ const createDraftReport = async (url: string, { arg }: { arg: { token: string }}
 // TYPES
 interface Step {
   id: string;
-  status: 'info' | 'search' | 'source' | 'analysis' | 'reasoning' | 'synthesis' | 'saving' | 'complete' | 'error';
+  status: 'info' | 'search' | 'source' | 'analysis' | 'reasoning' | 'synthesis' | 'saving' | 'complete' | 'error' | 'qloo_insight';
   message?: string;
   payload?: any;
 }
@@ -38,6 +39,12 @@ interface UploadedFileStatus {
     name: string;
     status: 'uploading' | 'success' | 'error';
     message?: string;
+}
+
+interface QlooInsights {
+    shared: string[];
+    acquirer_unique: string[];
+    target_unique: string[];
 }
 
 interface PromptInputBoxProps {
@@ -55,6 +62,32 @@ const TooltipContent = React.forwardRef<React.ElementRef<typeof TooltipPrimitive
   <TooltipPrimitive.Content ref={ref} sideOffset={sideOffset} className={cn("z-50 overflow-hidden rounded-md border border-border bg-popover px-3 py-1.5 text-sm text-popover-foreground shadow-md animate-in fade-in-0", className)} {...props} />
 ));
 TooltipContent.displayName = TooltipPrimitive.Content.displayName;
+
+const QlooInsightsPanel = ({ insights, acquirer, target }: { insights: QlooInsights, acquirer: string, target: string }) => (
+    <motion.div
+        layout
+        initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+        className="p-4 my-3 rounded-lg border bg-accent/50"
+    >
+        <h3 className="font-semibold text-sm mb-3 text-foreground flex items-center gap-2"><Sparkles className="h-4 w-4 text-purple-400" />Qloo Cultural Insights</h3>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+                <h4 className="font-medium text-xs text-muted-foreground flex items-center gap-1.5 mb-2"><TrendingUp className="h-3 w-3 text-green-500" />Shared Affinities</h4>
+                <div className="space-y-1">{insights.shared.map(item => <p key={item} className="text-xs text-foreground truncate">{item}</p>)}</div>
+            </div>
+            <Separator orientation="vertical" className="hidden md:block" />
+            <div>
+                <h4 className="font-medium text-xs text-muted-foreground mb-2">{acquirer} Unique</h4>
+                <div className="space-y-1">{insights.acquirer_unique.map(item => <p key={item} className="text-xs text-foreground truncate">{item}</p>)}</div>
+            </div>
+             <div>
+                <h4 className="font-medium text-xs text-muted-foreground mb-2">{target} Unique</h4>
+                <div className="space-y-1">{insights.target_unique.map(item => <p key={item} className="text-xs text-foreground truncate">{item}</p>)}</div>
+            </div>
+        </div>
+    </motion.div>
+);
+
 
 const SourceItem = ({ source }: { source: { url: string, title?: string }}) => {
     const domain = new URL(source.url).hostname?.replace('www.', '');
@@ -84,7 +117,8 @@ const StepItem = ({ step }: { step: Step }) => {
         synthesis: <BrainCircuit className="h-4 w-4 text-amber-500" />,
         saving: <Database className="h-4 w-4 text-green-500" />,
         complete: <CheckCircle className="h-4 w-4 text-green-500" />,
-        error: <AlertTriangle className="h-4 w-4 text-destructive" />
+        error: <AlertTriangle className="h-4 w-4 text-destructive" />,
+        qloo_insight: <Sparkles className="h-4 w-4 text-purple-400"/>
     };
 
     const renderContent = () => {
@@ -120,6 +154,7 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
     
     const [logSteps, setLogSteps] = useState<Step[]>([]);
     const [sources, setSources] = useState<Step[]>([]);
+    const [qlooInsights, setQlooInsights] = useState<QlooInsights | null>(null);
     const [isGenerating, setIsGenerating] = useState(false);
     const [isCollapsibleOpen, setIsCollapsibleOpen] = useState(true);
 
@@ -138,7 +173,7 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
     }, [accessToken, draftReportId, triggerDraft, isGenerating]);
     
     useEffect(() => { onPristineChange(!acquirer && !target && !notes && !uploadedFile); }, [acquirer, target, notes, uploadedFile, onPristineChange]);
-    useEffect(() => { if (scrollAreaRef.current) scrollAreaRef.current.scrollTo({ top: scrollAreaRef.current.scrollHeight, behavior: 'smooth' }); }, [logSteps, sources]);
+    useEffect(() => { if (scrollAreaRef.current) scrollAreaRef.current.scrollTo({ top: scrollAreaRef.current.scrollHeight, behavior: 'smooth' }); }, [logSteps, sources, qlooInsights]);
 
     const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -163,7 +198,7 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
              toast.error("Invalid Input", { description: "Please provide full, official brand names."});
             return;
         }
-        setIsGenerating(true); setLogSteps([]); setSources([]); setIsCollapsibleOpen(true);
+        setIsGenerating(true); setLogSteps([]); setSources([]); setQlooInsights(null); setIsCollapsibleOpen(true);
         
         try {
             const response = await fetch(`${API_URL}/api/v1/reports/${draftReportId}/generate`, {
@@ -187,6 +222,7 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
                         const jsonData = JSON.parse(line.substring(6));
                         const newStep: Step = { id: `step-${Date.now()}-${Math.random()}`, ...jsonData };
                         if (newStep.status === 'source') { setSources(prev => [...prev, newStep]); } 
+                        else if (newStep.status === 'qloo_insight') { setQlooInsights(newStep.payload); setLogSteps(prev => [...prev, newStep]); }
                         else { setLogSteps(prev => [...prev, newStep]); }
                         
                         if (newStep.status === 'complete') {
@@ -207,7 +243,7 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
     };
     
     const handleReset = (resetId = true) => {
-        setIsGenerating(false); setLogSteps([]); setSources([]);
+        setIsGenerating(false); setLogSteps([]); setSources([]); setQlooInsights(null);
         setAcquirer(""); setTarget(""); setNotes(""); setUploadedFile(null);
         if (resetId) setDraftReportId(null);
     }
@@ -221,11 +257,11 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
                 <ScrollArea className="h-[30rem] max-h-[60vh] px-4" ref={scrollAreaRef}>
                     <div className="space-y-3 py-4">
                         <AnimatePresence>{logSteps.map((step) => <StepItem key={step.id} step={step} />)}</AnimatePresence>
+                        {qlooInsights && <QlooInsightsPanel insights={qlooInsights} acquirer={acquirer} target={target} />}
                         {sources.length > 0 && <Collapsible open={isCollapsibleOpen} onOpenChange={setIsCollapsibleOpen}>
                             <CollapsibleTrigger className="w-full p-2 rounded-md hover:bg-muted/50 text-left">
                                 <div className="flex items-center justify-between"><div className="flex items-center gap-2 overflow-hidden"><Search className="h-4 w-4 text-blue-500 flex-shrink-0"/><span className="text-sm font-medium">Found {sources.length} sources</span>
                                 <div className="flex items-center gap-1.5 flex-shrink min-w-0">
-                                    {/* CORE FIX: Remove framer-motion from the list mapping */}
                                     {sources.map(source => <FaviconPreview key={source.id} url={source.payload.url}/>)}
                                 </div>
                                 </div><span className="text-xs text-muted-foreground">{isCollapsibleOpen ? 'Collapse' : 'Expand'}</span></div>

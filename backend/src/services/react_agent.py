@@ -183,23 +183,32 @@ async def intelligent_cultural_analysis_tool(acquirer_brand_name: str, target_br
 
     if not aggregated_acquirer_tastes or not aggregated_target_tastes:
         error_msg = "Error: Could not retrieve any taste data from Qloo for the brands or their cultural products."
+        logger.error(error_msg)
         return {"context_str": error_msg, "culture_clashes": [], "untapped_growths": []}
     
     # 4. Perform comparison on aggregated sets
     shared_tastes = list(aggregated_acquirer_tastes.intersection(aggregated_target_tastes))
     union_size = len(aggregated_acquirer_tastes.union(aggregated_target_tastes))
     unique_to_acquirer = list(aggregated_acquirer_tastes - aggregated_target_tastes)
-    unique_to_target = list(aggregated_target_tastes - aggregated_target_tastes)
+    # CORE FIX: The logic here was bugged, subtracting a set from itself.
+    unique_to_target = list(aggregated_target_tastes - aggregated_acquirer_tastes)
 
     culture_clashes = []
     for interest in unique_to_acquirer[:5]:
-        culture_clashes.append({"topic": interest, "description": "The acquirer's audience ecosystem shows a strong affinity for this, a taste not shared by the target's.", "severity": "MEDIUM"})
+        culture_clashes.append({"topic": interest, "description": "The Acquirer's audience ecosystem shows a strong affinity for this, a taste not shared by the Target's.", "severity": "MEDIUM"})
     for interest in unique_to_target[:5]:
-        culture_clashes.append({"topic": interest, "description": "The target's audience ecosystem shows a strong affinity for this, a taste not shared by the acquirer's.", "severity": "HIGH"})
+        culture_clashes.append({"topic": interest, "description": "The Target's audience ecosystem shows a strong affinity for this, a taste not shared by the Acquirer's.", "severity": "HIGH"})
         
     untapped_growths = []
     for interest in shared_tastes[:5]:
         untapped_growths.append({"description": f"Both audience ecosystems show a strong affinity for '{interest}'. This shared passion could be a key pillar for joint marketing campaigns.", "potential_impact_score": 8})
+
+    # THE FIX: Add a new key to the return value specifically for streaming to the frontend.
+    qloo_insights_for_stream = {
+        "shared": shared_tastes[:5],
+        "acquirer_unique": unique_to_acquirer[:5],
+        "target_unique": unique_to_target[:5]
+    }
 
     # 5. Return the full analysis object
     return {
@@ -210,6 +219,7 @@ async def intelligent_cultural_analysis_tool(acquirer_brand_name: str, target_br
             "target_unique_tastes_top_5": unique_to_target[:5],
             "analysis_proxies": {"acquirer": acquirer_search_terms, "target": target_search_terms}
         }),
+        "qloo_insights_for_stream": qloo_insights_for_stream,
         "culture_clashes": culture_clashes,
         "untapped_growths": untapped_growths,
         "sources": acquirer_profile_result.get('sources', []) + target_profile_result.get('sources', [])
@@ -320,12 +330,8 @@ class AlloyReActAgent:
             if not tool_name:
                 observation = "Error: Your action JSON is missing the 'tool_name' key."
             elif tool_name == "finish":
-                required_keys = ['acquirer_profile', 'target_profile', 'qloo_analysis', 'acquirer_culture_profile', 'target_culture_profile', 'acquirer_financial_profile', 'target_financial_profile']
-                for key in required_keys:
-                    if key not in self.gathered_data:
-                        self.gathered_data[key] = f"Data for '{key}' was not gathered."
-                
-                self.final_data = params.get("gathered_data", self.gathered_data)
+                # CORE FIX: The agent should pass its internally gathered data to the finish tool.
+                self.final_data = self.gathered_data
                 yield {"status": "complete"}
                 return
             elif tool_name not in self.tools:
@@ -336,20 +342,19 @@ class AlloyReActAgent:
                     observation = tool_result.get('context_str', f"Tool {tool_name} ran but provided no context.")
                     sources = tool_result.get('sources', [])
                     
-                    search_string = " ".join(str(v) for v in params.values()).lower()
-                    is_acquirer = self.acquirer_brand.lower() in search_string
-                    is_target = self.target_brand.lower() in search_string
+                    # CORE FIX: Explicitly check params to determine the target and data key.
+                    # This is far more robust than parsing the query string.
+                    brand_name_param = params.get('brand_name') or params.get('acquirer_brand_name')
+                    is_acquirer = brand_name_param == self.acquirer_brand
+                    is_target = brand_name_param == self.target_brand
                     
-                    # More robust check
-                    if 'brand_name' in params and params['brand_name'] == self.acquirer_brand: is_acquirer = True
-                    if 'brand_name' in params and params['brand_name'] == self.target_brand: is_target = True
-
                     if tool_name == "web_search":
-                        if is_acquirer and not is_target:
+                        if is_acquirer:
                             self.completed_steps.add("searched_acquirer_profile")
                             self.gathered_data['acquirer_profile'] = observation
                             self.all_sources['acquirer_sources'].extend(sources)
-                        elif is_target and not is_acquirer:
+                        # The query could be for the target brand
+                        elif self.target_brand in params.get('query', ''):
                             self.completed_steps.add("searched_target_profile")
                             self.gathered_data['target_profile'] = observation
                             self.all_sources['target_sources'].extend(sources)
@@ -377,6 +382,14 @@ class AlloyReActAgent:
                     elif tool_name == "intelligent_cultural_analysis_tool":
                         self.completed_steps.add("performed_intelligent_qloo_analysis")
                         self.all_sources['search_sources'].extend(sources) # Add sources from proxy search
+                        
+                        # THE FIX: If the tool provides specific insights for streaming, yield them now.
+                        if 'qloo_insights_for_stream' in tool_result:
+                            yield {
+                                "status": "qloo_insight",
+                                "payload": tool_result['qloo_insights_for_stream']
+                            }
+                        
                         try:
                             self.gathered_data['qloo_analysis'] = json.loads(observation)
                             self.gathered_data['culture_clashes'] = tool_result.get('culture_clashes', [])

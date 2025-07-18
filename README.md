@@ -1,5 +1,7 @@
 # automatic refresh
 # Allow deep thought for agent
+# Visualizing "Clashes": The "Culture Clashes" and "Untapped Growth" sections are currently presented in tables. A more visual representation (e.g., a Venn diagram, a force-directed graph, or distinct "word clouds" for each brand's unique tastes) could make these insights even more impactful at a glance.
+# Let AI decide what query to use for web search
 
 Alloy - The Cultural Due Diligence Platform
 

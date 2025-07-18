@@ -30,6 +30,7 @@ import { ChartContainer } from "../ui/chart";
 import { ScrollArea } from "../ui/scroll-area";
 import { cn } from "@/lib/utils";
 import React, { useMemo } from "react";
+import ReactMarkdown from "react-markdown";
 
 interface ReportViewProps {
   report: Report;
@@ -322,7 +323,7 @@ const FinancialAnalysis = ({ report }: { report: Report }) => {
                         <CardTitle>Acquirer Financial Profile</CardTitle>
                         <CardDescription>Raw intelligence gathered on {report.acquirer_brand}.</CardDescription>
                     </CardHeader>
-                    <CardContent className="space-y-4"><ScrollArea className="h-48"><p className="text-sm text-muted-foreground whitespace-pre-wrap">{analysis.acquirer_financial_profile || "No data found."}</p></ScrollArea>
+                    <CardContent className="space-y-4"><ScrollArea className="h-48"><p className="text-sm text-muted-foreground whitespace-pre-wrap"><ReactMarkdown>{analysis.acquirer_financial_profile || "No data found."}</ReactMarkdown></p></ScrollArea>
                         {analysis.acquirer_financial_sources && analysis.acquirer_financial_sources.length > 0 && <div><h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">Sources</h4><div className="flex flex-wrap gap-2">{analysis.acquirer_financial_sources.map(s => <SourcePill key={s.url} url={s.url} />)}</div></div>}
                     </CardContent>
                 </Card>
@@ -331,7 +332,7 @@ const FinancialAnalysis = ({ report }: { report: Report }) => {
                         <CardTitle>Target Financial Profile</CardTitle>
                         <CardDescription>Raw intelligence gathered on {report.target_brand}.</CardDescription>
                     </CardHeader>
-                    <CardContent className="space-y-4"><ScrollArea className="h-48"><p className="text-sm text-muted-foreground whitespace-pre-wrap">{analysis.target_financial_profile || "No data found."}</p></ScrollArea>
+                    <CardContent className="space-y-4"><ScrollArea className="h-48"><p className="text-sm text-muted-foreground whitespace-pre-wrap"><ReactMarkdown>{analysis.target_financial_profile || "No data found."}</ReactMarkdown></p></ScrollArea>
                         {analysis.target_financial_sources && analysis.target_financial_sources.length > 0 && <div><h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">Sources</h4><div className="flex flex-wrap gap-2">{analysis.target_financial_sources.map(s => <SourcePill key={s.url} url={s.url} />)}</div></div>}
                     </CardContent>
                 </Card>

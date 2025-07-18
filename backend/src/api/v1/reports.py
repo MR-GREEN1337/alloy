@@ -8,11 +8,13 @@ from fastapi.responses import StreamingResponse, Response
 import json
 import google.generativeai as genai
 import uuid
+import asyncio
 
 from src.db.postgresql import get_session, postgres_db
 from src.db import models
 from src.core.settings import get_settings
 from src.api.v1.auth import get_current_user
+from src.api.v1.utils import fetch_favicon_bytes
 from src.services.react_agent import AlloyReActAgent
 from src.services.docling import process_document_with_docling
 from src.services.report_generator import generate_chat_response
@@ -71,49 +73,61 @@ async def mark_report_as_failed(report_id: uuid.UUID) -> None:
         logger.error(f"Could not mark report {report_id} as FAILED: {e}")
 
 async def synthesize_final_report(agent_data: dict) -> dict:
-    """Takes the agent's gathered data and synthesizes the final report with an LLM call."""
+    """
+    Takes the agent's gathered data, uses an LLM to synthesize qualitative summaries,
+    and then programmatically adds the quantitative scores for a reliable final report.
+    """
     logger.info("Synthesizing final report from agent data.")
-    model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
     
+    # --- Part 1: Handle scores deterministically in Python ---
+    qloo_analysis = agent_data.get('qloo_analysis', {})
+    affinity_score = _safe_float(qloo_analysis.get('affinity_overlap_score', 0.0))
+    cultural_score = affinity_score
+    
+    # --- Part 2: Simplify the LLM's task to only text synthesis ---
     data_for_synthesis = {
         key: value for key, value in agent_data.items() 
-        if key not in ['culture_clashes', 'untapped_growths']
+        if key not in ['culture_clashes', 'untapped_growths', 'qloo_analysis']
     }
 
+    model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
     prompt = f"""
     You are a senior M&A analyst from a top-tier investment bank. You have been provided with raw data from your junior research team.
-    Your task is to synthesize this data into a final, professional due diligence report.
+    Your task is to synthesize this data into professional, qualitative summaries for a due diligence report.
 
     **RAW DATA FOR SYNTHESIS:**
     ```json
     {json.dumps(data_for_synthesis, indent=2)}
     ```
 
-    **YOUR TASK (Return a single JSON object):**
+    **YOUR TASK (Return a single JSON object with TEXT summaries only):**
     Based *only* on the raw data provided, generate a complete report with the following keys:
-    - "cultural_compatibility_score": A float (0-100). Base this on affinity_overlap_score. A high score is good. If Qloo fails, score is 0.0.
-    - "affinity_overlap_score": A float, taken directly from the 'qloo_analysis'. If it's missing, this should be 0.0.
     - "brand_archetype_summary": An object with "acquirer_archetype" and "target_archetype" strings. Deduce these from their 'acquirer_profile' and 'target_profile'.
     - "corporate_ethos_summary": An object with "acquirer_ethos" and "target_ethos" strings. Synthesize a sharp, comparative analysis of each company's leadership, values, and work culture based on their 'acquirer_culture_profile' and 'target_culture_profile'.
     - "financial_synthesis": A string providing a comparative summary of the two companies' financial health and market positioning based on their respective financial profiles.
-    - "strategic_summary": A string providing a concise, executive-level overview of all findings, combining brand, corporate, and financial insights into a final recommendation.
+    - "strategic_summary": A string providing a concise, executive-level overview of all findings, combining brand, corporate, and financial insights into a final recommendation. If cultural data seems missing, mention this as a potential risk.
 
-    Return ONLY the final JSON object.
+    Return ONLY the final JSON object containing these text-based summaries. Do NOT include any scores.
     """
     
     try:
         response = await model.generate_content_async(prompt, generation_config={"response_mime_type": "application/json"})
-        report = json.loads(response.text)
-        # Use the safe conversion helper here as well
-        report['cultural_compatibility_score'] = _safe_float(report.get('cultural_compatibility_score'))
-        report['affinity_overlap_score'] = _safe_float(report.get('affinity_overlap_score'))
-        return report
+        report_from_llm = json.loads(response.text)
+        
+        # --- Part 3: Merge deterministic scores with LLM summaries ---
+        final_report = {
+            "cultural_compatibility_score": cultural_score,
+            "affinity_overlap_score": affinity_score,
+            **report_from_llm
+        }
+        return final_report
+        
     except Exception as e:
         logger.error(f"Final report synthesis failed: {e}")
         return {
             "strategic_summary": "Analysis failed during final synthesis. Key data may be missing.",
-            "cultural_compatibility_score": 0.0,
-            "affinity_overlap_score": _safe_float(agent_data.get('qloo_analysis', {}).get('affinity_overlap_score')),
+            "cultural_compatibility_score": cultural_score,
+            "affinity_overlap_score": affinity_score,
             "brand_archetype_summary": {"acquirer_archetype": "N/A", "target_archetype": "N/A"},
             "corporate_ethos_summary": {"acquirer_ethos": "N/A", "target_ethos": "N/A"},
             "financial_synthesis": "N/A"
@@ -150,6 +164,8 @@ async def generate_full_report_stream(report_id: uuid.UUID, payload: ReportGener
             if raw_status in ["action", "observation", "thinking"]: return ""
             event_data = {"payload": data.get("payload")}
             if raw_status == "source": event_data['status'] = 'source'
+            # THE FIX: Add the new event type for Qloo insights.
+            elif raw_status == "qloo_insight": event_data['status'] = 'qloo_insight'; event_data['message'] = 'Qloo analysis complete.'
             elif raw_status == "thought": event_data['status'] = 'reasoning'; event_data['message'] = data.get("message", "").replace('**Thought**:', '').strip()
             elif raw_status == "complete": return "" 
             elif raw_status == "error": event_data['status'] = 'error'; event_data['message'] = data.get("message")
@@ -194,7 +210,6 @@ async def generate_full_report_stream(report_id: uuid.UUID, payload: ReportGener
 
             yield f"data: {json.dumps({'status': 'saving', 'message': 'Saving final analysis to database'})}\n\n"
             async with postgres_db.get_session() as save_session:
-                # Eagerly load relationships to ensure they are available for modification
                 stmt = select(models.Report).where(models.Report.id == report_id).options(
                     selectinload(models.Report.analysis),
                     selectinload(models.Report.culture_clashes),
@@ -206,24 +221,19 @@ async def generate_full_report_stream(report_id: uuid.UUID, payload: ReportGener
                 if not save_report:
                     raise Exception("Report not found during save operation.")
                 
-                logger.info(f"Report {report_id}: Replacing analysis and child collections.")
-
-                # This is a robust way to replace related objects.
-                # By assigning a new object/list to the relationship attribute,
-                # SQLAlchemy's `delete-orphan` cascade handles the removal of old items.
+                # Assign the analysis object with data from the LLM summary
                 save_report.analysis = models.ReportAnalysis(
                     report_id=save_report.id, 
-                    # THE FIX: Use the safe float conversion for all float fields
                     cultural_compatibility_score=_safe_float(final_report_summary.get('cultural_compatibility_score')),
                     affinity_overlap_score=_safe_float(final_report_summary.get('affinity_overlap_score')),
                     brand_archetype_summary=json.dumps(final_report_summary.get('brand_archetype_summary', {})),
                     corporate_ethos_summary=json.dumps(final_report_summary.get('corporate_ethos_summary', {})),
                     strategic_summary=final_report_summary.get('strategic_summary', 'Analysis failed.'),
                     financial_synthesis=final_report_summary.get('financial_synthesis', 'Analysis failed.'),
-                    acquirer_corporate_profile=agent_final_data.get('acquirer_culture_profile') or "",
-                    target_corporate_profile=agent_final_data.get('target_culture_profile') or "",
-                    acquirer_financial_profile=agent_final_data.get('acquirer_financial_profile') or "",
-                    target_financial_profile=agent_final_data.get('target_financial_profile') or "",
+                    acquirer_corporate_profile=str(agent_final_data.get('acquirer_culture_profile') or ""),
+                    target_corporate_profile=str(agent_final_data.get('target_culture_profile') or ""),
+                    acquirer_financial_profile=str(agent_final_data.get('acquirer_financial_profile') or ""),
+                    target_financial_profile=str(agent_final_data.get('target_financial_profile') or ""),
                     search_sources=agent.all_sources.get('search_sources', []),
                     acquirer_sources=agent.all_sources.get('acquirer_sources', []),
                     target_sources=agent.all_sources.get('target_sources', []),
@@ -233,17 +243,20 @@ async def generate_full_report_stream(report_id: uuid.UUID, payload: ReportGener
                     target_financial_sources=agent.all_sources.get('target_financial_sources', [])
                 )
 
+                # THE FIX: Directly assign clashes and growths from the agent's raw data.
+                # This ensures the deterministically generated lists are saved.
                 save_report.culture_clashes = [
-                    models.CultureClash(report_id=save_report.id, **clash) for clash in agent_final_data.get('culture_clashes', [])
+                    models.CultureClash(report_id=save_report.id, **clash) 
+                    for clash in agent_final_data.get('culture_clashes', [])
                 ]
                 save_report.untapped_growths = [
-                    models.UntappedGrowth(report_id=save_report.id, **growth) for growth in agent_final_data.get('untapped_growths', [])
+                    models.UntappedGrowth(report_id=save_report.id, **growth) 
+                    for growth in agent_final_data.get('untapped_growths', [])
                 ]
                 
                 save_report.status = models.ReportStatus.COMPLETED
                 save_session.add(save_report)
                 
-                logger.info(f"Report {report_id}: Committing final report to the database.")
                 await save_session.commit()
                 logger.success(f"Report {report_id}: Final report committed successfully.")
                 generation_succeeded = True
@@ -278,6 +291,12 @@ async def download_report_pdf(report_id: uuid.UUID, session: AsyncSession = Depe
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found or not complete.")
 
     try:
+        # Fetch favicons concurrently
+        acquirer_favicon_bytes, target_favicon_bytes = await asyncio.gather(
+            fetch_favicon_bytes(report.acquirer_brand),
+            fetch_favicon_bytes(report.target_brand)
+        )
+
         # Reconstruct the LLM summary payload for the PDF generator
         llm_summary = {
             "strategic_summary": report.analysis.strategic_summary,
@@ -286,7 +305,12 @@ async def download_report_pdf(report_id: uuid.UUID, session: AsyncSession = Depe
             "corporate_ethos": json.loads(report.analysis.corporate_ethos_summary) if report.analysis.corporate_ethos_summary else {}
         }
         
-        pdf_bytes = create_report_pdf(report, llm_summary)
+        pdf_bytes = create_report_pdf(
+            report, 
+            llm_summary,
+            acquirer_favicon_bytes,
+            target_favicon_bytes
+        )
         
         filename = f"Alloy_Report_{report.acquirer_brand}_vs_{report.target_brand}.pdf"
         headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
@@ -296,7 +320,7 @@ async def download_report_pdf(report_id: uuid.UUID, session: AsyncSession = Depe
         logger.error(f"Failed to generate PDF for report {report_id}: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to generate PDF report.")
 
-@router.get("/", response_model=List[models.ReportRead])
+@router.get("")
 async def get_reports(session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     statement = (
         select(models.Report)
@@ -314,24 +338,20 @@ async def get_reports(session: AsyncSession = Depends(get_session), current_user
     result = await session.execute(statement)
     db_reports = result.scalars().all()
     
-    # DEFINITIVE FIX: The most robust way to return complex ORM models is a two-step process:
-    # 1. Validate the database objects against the Pydantic "Read" schemas.
     pydantic_reports = [models.ReportRead.model_validate(report) for report in db_reports]
-    # 2. Dump the validated Pydantic models into pure Python dictionaries. This strips all
-    #    ORM-specific state, leaving a clean structure that FastAPI can reliably serialize.
     return [report.model_dump() for report in pydantic_reports]
 
 
-@router.get("/{report_id}", response_model=models.ReportRead)
+@router.get("/{report_id}")
 async def get_report(report_id: uuid.UUID, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     statement = select(models.Report).where(models.Report.id == report_id, models.Report.user_id == current_user.id).options(selectinload(models.Report.analysis), selectinload(models.Report.culture_clashes), selectinload(models.Report.untapped_growths))
     result = await session.execute(statement)
     report = result.scalar_one_or_none()
     if not report or (report.status == models.ReportStatus.DRAFT and report.user_id != current_user.id): raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found")
 
-    # DEFINITIVE FIX: Apply the same validate-then-dump pattern for consistency and robustness.
     pydantic_report = models.ReportRead.model_validate(report)
     return pydantic_report.model_dump()
+
 
 @router.delete("/{report_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_report(report_id: uuid.UUID, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
