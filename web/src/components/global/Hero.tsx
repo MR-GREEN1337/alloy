@@ -336,7 +336,7 @@ export const AlloyHeroSection: React.FC = () => {
           transition={{ duration: 0.5 }}
           className="px-4 backdrop-blur-3xl bg-black/50 rounded-full py-3 flex justify-between items-center"
         >
-          <Logo />
+          <Logo hideText={false} className="text-white"/>
           <div className="flex items-center space-x-4">
             <Link href="/login">
               <button className="hidden md:block px-4 py-2 text-sm text-gray-300 hover:text-white transition-colors">Log In</button>

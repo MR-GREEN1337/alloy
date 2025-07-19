@@ -16,7 +16,7 @@ interface LogoProps {
   hideText?: boolean;
 }
 
-export const Logo: React.FC<LogoProps> = ({ className, hideText = false }) => {
+export const Logo: React.FC<LogoProps> = ({ className, hideText = true }) => {
   const pathname = usePathname();
 
   return (
@@ -40,6 +40,16 @@ export const Logo: React.FC<LogoProps> = ({ className, hideText = false }) => {
           <path d="M20 12V28M12 20H28" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </div>
+      {!hideText && (
+        <span
+          className={cn(
+            "text-xl font-bold tracking-tighter text-white",
+            playfair.className, className
+          )}
+        >
+          Alloy
+        </span>
+      )}
     </Link>
   );
 };

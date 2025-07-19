@@ -33,7 +33,7 @@ export default function AuthLayout({
   return (
     <div className="bg-background text-foreground relative flex min-h-screen w-full font-sans">
       <div className="absolute top-6 left-6 z-10">
-        <Logo className="text-foreground" />
+        <Logo className="text-black" hideText={false}/>
       </div>
       
       <div className="flex flex-1 flex-col justify-center items-center gap-6 p-4 lg:p-8">

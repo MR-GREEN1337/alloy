@@ -2,6 +2,8 @@
 
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import Cookies from 'js-cookie';
+import { SWRConfig } from 'swr';
+import { toast } from 'sonner';
 
 // A simple JWT parser without adding extra dependencies
 const parseJwt = (token: string) => {
@@ -30,7 +32,8 @@ interface AuthContextType {
   logout: () => void;
   isAuthenticated: boolean;
   isLoading: boolean;
-  apiUrl: string; // Add apiUrl to the context
+  apiUrl: string;
+  authedFetch: (url: string, options?: RequestInit) => Promise<Response>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -52,22 +55,65 @@ export const AuthProvider = ({ children, apiUrl }: { children: React.ReactNode, 
     setIsLoading(false);
   }, []);
 
-  const login = useCallback((token: string, refreshToken: string) => {
-    const decodedToken = parseJwt(token);
-    if (decodedToken && decodedToken.sub) {
-      setUser({ email: decodedToken.sub, full_name: decodedToken.full_name });
-      setAccessToken(token);
-      Cookies.set('alloy_access_token', token, { expires: 1/24, secure: process.env.NODE_ENV === 'production' }); // 1 hour
-      Cookies.set('alloy_refresh_token', refreshToken, { expires: 7, secure: process.env.NODE_ENV === 'production' });
-    }
-  }, []);
-
   const logout = useCallback(() => {
     setUser(null);
     setAccessToken(null);
     Cookies.remove('alloy_access_token');
     Cookies.remove('alloy_refresh_token');
     window.location.href = '/login';
+  }, []);
+
+  const refreshAccessToken = useCallback(async (): Promise<string | null> => {
+    const refreshToken = Cookies.get('alloy_refresh_token');
+    if (!refreshToken) {
+      logout();
+      return null;
+    }
+    try {
+      const res = await fetch(`${apiUrl}/api/v1/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
+      if (!res.ok) throw new Error('Refresh failed, please log in again.');
+      const { access_token: newAccessToken } = await res.json();
+      const decodedToken = parseJwt(newAccessToken);
+      setAccessToken(newAccessToken);
+      if (decodedToken) setUser({ email: decodedToken.sub, full_name: decodedToken.full_name });
+      Cookies.set('alloy_access_token', newAccessToken, { expires: 1 / 24, secure: process.env.NODE_ENV === 'production' });
+      return newAccessToken;
+    } catch (error) {
+      console.error("Token refresh failed:", error);
+      logout();
+      return null;
+    }
+  }, [apiUrl, logout]);
+
+  const authedFetch = useCallback(async (url: string, options?: RequestInit): Promise<Response> => {
+    let token = Cookies.get('alloy_access_token');
+    if (!token) { logout(); throw new Error("User not authenticated"); }
+    
+    const res = await fetch(url, { ...options, headers: { ...options?.headers, 'Authorization': `Bearer ${token}` } });
+    
+    if (res.status === 401) {
+      const newToken = await refreshAccessToken();
+      if (newToken) {
+        return fetch(url, { ...options, headers: { ...options?.headers, 'Authorization': `Bearer ${newToken}` } });
+      } else {
+        throw new Error("Session expired");
+      }
+    }
+    return res;
+  }, [logout, refreshAccessToken]);
+
+  const login = useCallback((token: string, refreshToken: string) => {
+    const decodedToken = parseJwt(token);
+    if (decodedToken && decodedToken.sub) {
+      setUser({ email: decodedToken.sub, full_name: decodedToken.full_name });
+      setAccessToken(token);
+      Cookies.set('alloy_access_token', token, { expires: 1 / 24, secure: process.env.NODE_ENV === 'production' }); // 1 hour
+      Cookies.set('alloy_refresh_token', refreshToken, { expires: 7, secure: process.env.NODE_ENV === 'production' });
+    }
   }, []);
 
   const value = {
@@ -77,10 +123,24 @@ export const AuthProvider = ({ children, apiUrl }: { children: React.ReactNode, 
     logout,
     isAuthenticated: !!accessToken,
     isLoading,
-    apiUrl, // Provide the runtime URL to the context
+    apiUrl,
+    authedFetch,
   };
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+  const swrFetcher = async (url: string) => {
+      const res = await authedFetch(url);
+      if (!res.ok) {
+          const errorData = await res.json().catch(() => ({ detail: `Request failed with status ${res.status}` }));
+          throw new Error(errorData.detail);
+      }
+      return res.json();
+  };
+
+  return <AuthContext.Provider value={value}>
+    <SWRConfig value={{ fetcher: swrFetcher, onError: (error) => {
+      if (error.message !== 'Session expired' && error.message !== 'User not authenticated') { toast.error("Error", { description: error.message }); }
+    }}}>{children}</SWRConfig>
+  </AuthContext.Provider>;
 };
 
 export const useAuth = () => {

@@ -32,27 +32,23 @@ const faqItems = [
 ];
 
 export default function SupportPage() {
-  const { accessToken } = useAuth();
+  const { authedFetch } = useAuth();
   const [category, setCategory] = useState('');
   const [subject, setSubject] = useState('');
   const [message, setMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!category || !subject.trim() || !message.trim()) {
       toast.error("All fields are required.");
       return;
     }
-    setIsLoading(true);
 
-    // This endpoint doesn't exist, but we use the relative path pattern for consistency.
-    const promise = fetch(`/api/v1/utils/support/ticket`, {
+    // This endpoint doesn't exist on the backend, but we now use authedFetch.
+    // For demo purposes, we'll mock the success case from the 404 response.
+    const promise = authedFetch(`/api/v1/utils/support/ticket`, {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${accessToken}`,
-        },
         body: JSON.stringify({ category, subject, message }),
     }).then(res => {
         if (!res.ok) {
@@ -72,7 +68,6 @@ export default function SupportPage() {
         return data.message || 'Ticket submitted successfully!';
       },
       error: (err) => err.message,
-      finally: () => setIsLoading(false)
     });
   };
 

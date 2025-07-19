@@ -9,35 +9,21 @@ import { useParams } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { useState } from 'react';
 import { toast } from 'sonner';
-
-const fetcher = (url: string, token: string) => 
-  fetch(url, { headers: { 'Authorization': `Bearer ${token}` } }).then(res => {
-    if (!res.ok) {
-        if (res.status === 404) {
-            throw new Error('Report not found. You may not have access or it may not exist.');
-        }
-        throw new Error('An error occurred while fetching the report.');
-    }
-    return res.json();
-  });
+import { Report } from '@/types/report';
 
 export default function ReportPage() {
     const { id } = useParams<{ id: string }>();
-    const { accessToken } = useAuth();
-    const { data: report, error, isLoading } = useSWR(
-        accessToken ? [`/api/v1/reports/${id}`, accessToken] : null,
-        ([url, token]) => fetcher(url, token)
+    const { accessToken, authedFetch } = useAuth();
+    const { data: report, error, isLoading } = useSWR<Report>(
+        accessToken ? `/api/v1/reports/${id}` : null
     );
-    console.log(report);
     const [isDownloading, setIsDownloading] = useState(false);
 
     const handleDownload = async () => {
         if (!report || !accessToken) return;
         setIsDownloading(true);
         try {
-            const res = await fetch(`/api/v1/reports/${report.id}/download-pdf`, {
-                headers: { 'Authorization': `Bearer ${accessToken}` }
-            });
+            const res = await authedFetch(`/api/v1/reports/${report.id}/download-pdf`);
             if (!res.ok) {
                 const errorData = await res.json();
                 throw new Error(errorData.detail || "Failed to download PDF.");
