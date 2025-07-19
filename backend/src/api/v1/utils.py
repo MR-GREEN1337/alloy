@@ -8,6 +8,7 @@ from loguru import logger
 
 from src.core.settings import get_settings
 from src.services.search import find_official_website
+from fastapi_simple_rate_limiter import rate_limiter
 
 router = APIRouter()
 settings = get_settings()
@@ -48,6 +49,12 @@ async def find_favicon_url(url: str, client: httpx.AsyncClient) -> Optional[str]
     if icon_link and icon_link.has_attr("href"):
         favicon_href = icon_link["href"]
         favicon_url = urljoin(str(response.url), favicon_href)
+
+        # --- FIX: Add a check to ignore generic scraper favicons ---
+        if "scraperapi.com" in favicon_url:
+            logger.warning(f"Ignoring generic scraper favicon for {url}")
+            return None # Explicitly return None to continue searching
+
         logger.success(f"Successfully found favicon for {url} at {favicon_url}")
         return favicon_url
     return None
@@ -76,6 +83,7 @@ async def fetch_favicon_bytes(brand_name: str) -> Optional[bytes]:
         return None
 
 @router.get("/favicon", response_class=RedirectResponse, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+@rate_limiter(limit=30, seconds=60)
 async def get_favicon(
     url: Optional[str] = Query(None),
     brandName: Optional[str] = Query(None)

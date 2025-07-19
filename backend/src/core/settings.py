@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     # AI APIs
     QLOO_API_KEY: str
     GEMINI_API_KEY: str
-    GEMINI_MODEL_NAME: str = "gemini-2.5-flash"
+    GEMINI_MODEL_NAME: str = "gemini-2.5-pro"
     TAVILY_API_KEY: str
     SCRAPER_API_KEY: str
     

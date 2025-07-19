@@ -20,6 +20,7 @@ from src.services.docling import process_document_with_docling
 from src.services.report_generator import generate_chat_response
 from src.services.pdf_generator import create_report_pdf
 from loguru import logger
+from fastapi_simple_rate_limiter import rate_limiter
 
 router = APIRouter()
 settings = get_settings()
@@ -34,7 +35,6 @@ class ReportGeneratePayload(SQLModel):
     use_grounding: bool = False
 
 class DraftReportResponse(SQLModel):
-    # Change ID to UUID
     id: uuid.UUID
     status: models.ReportStatus
     created_at: datetime
@@ -79,15 +79,13 @@ async def synthesize_final_report(agent_data: dict) -> dict:
     """
     logger.info("Synthesizing final report from agent data.")
     
-    # --- Part 1: Handle scores deterministically in Python ---
     qloo_analysis = agent_data.get('qloo_analysis', {})
     affinity_score = _safe_float(qloo_analysis.get('affinity_overlap_score', 0.0))
     cultural_score = affinity_score
     
-    # --- Part 2: Simplify the LLM's task to only text synthesis ---
     data_for_synthesis = {
         key: value for key, value in agent_data.items() 
-        if key not in ['culture_clashes', 'untapped_growths', 'qloo_analysis']
+        if key not in ['culture_clashes', 'untapped_growths', 'qloo_analysis', 'persona_expansion']
     }
 
     model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
@@ -114,7 +112,6 @@ async def synthesize_final_report(agent_data: dict) -> dict:
         response = await model.generate_content_async(prompt, generation_config={"response_mime_type": "application/json"})
         report_from_llm = json.loads(response.text)
         
-        # --- Part 3: Merge deterministic scores with LLM summaries ---
         final_report = {
             "cultural_compatibility_score": cultural_score,
             "affinity_overlap_score": affinity_score,
@@ -135,6 +132,7 @@ async def synthesize_final_report(agent_data: dict) -> dict:
 
 # --- API Endpoints ---
 @router.post("/draft", response_model=DraftReportResponse, status_code=status.HTTP_201_CREATED)
+@rate_limiter(limit=30, seconds=60)
 async def create_draft_report(session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     logger.info(f"User {current_user.email} creating new draft report.")
     new_report = models.Report(user_id=current_user.id, status=models.ReportStatus.DRAFT)
@@ -145,6 +143,7 @@ async def create_draft_report(session: AsyncSession = Depends(get_session), curr
     return new_report
 
 @router.post("/{report_id}/upload_context_file", response_model=FileUploadResponse)
+@rate_limiter(limit=30, seconds=60)
 async def upload_context_file(report_id: uuid.UUID, file: UploadFile = File(...), session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     report = await session.get(models.Report, report_id)
     if not report or report.user_id != current_user.id:
@@ -156,22 +155,22 @@ async def upload_context_file(report_id: uuid.UUID, file: UploadFile = File(...)
     return FileUploadResponse(filename=file.filename, content_type=file.content_type or "application/octet-stream", size_in_bytes=file.size)
 
 @router.post("/{report_id}/generate")
+@rate_limiter(limit=30, seconds=60)
 async def generate_full_report_stream(report_id: uuid.UUID, payload: ReportGeneratePayload, current_user: models.User = Depends(get_current_user)):
     
     async def event_generator() -> AsyncGenerator[str, None]:
         def format_sse_event(data: dict) -> str:
             raw_status = data.get("status")
-            if raw_status in ["action", "observation", "thinking"]: return ""
+            if raw_status in ["action", "observation", "thinking", "qloo_insight"]: return ""
             event_data = {"payload": data.get("payload")}
             if raw_status == "source": event_data['status'] = 'source'
-            # THE FIX: Add the new event type for Qloo insights.
-            elif raw_status == "qloo_insight": event_data['status'] = 'qloo_insight'; event_data['message'] = 'Qloo analysis complete.'
             elif raw_status == "thought": event_data['status'] = 'reasoning'; event_data['message'] = data.get("message", "").replace('**Thought**:', '').strip()
             elif raw_status == "complete": return "" 
             elif raw_status == "error": event_data['status'] = 'error'; event_data['message'] = data.get("message")
             else:
                 action_payload = data.get('payload', {}); tool_name = action_payload.get('tool_name')
                 if 'qloo' in tool_name: event_data['status'] = 'analysis'; event_data['message'] = "Performing comparative cultural analysis..."
+                elif 'persona_expansion_tool' in tool_name: event_data['status'] = 'analysis'; event_data['message'] = "Predicting latent synergies via Persona API..."
                 elif 'corporate_culture' in tool_name: event_data['status'] = 'analysis'; event_data['message'] = f"Investigating corporate culture at {action_payload.get('parameters', {}).get('brand_name')}"
                 elif 'financial_and_market' in tool_name: event_data['status'] = 'analysis'; event_data['message'] = f"Analyzing market position of {action_payload.get('parameters', {}).get('brand_name')}"
                 elif 'web_search' in tool_name: event_data['status'] = 'search'; event_data['message'] = f"Researching: {action_payload.get('parameters', {}).get('query')}"
@@ -198,10 +197,16 @@ async def generate_full_report_stream(report_id: uuid.UUID, payload: ReportGener
             yield f"data: {json.dumps({'status': 'info', 'message': f'Starting analysis for {payload.acquirer_brand} vs. {payload.target_brand}'})}\n\n"
 
             agent = AlloyReActAgent(report_to_generate.acquirer_brand, report_to_generate.target_brand, (report_to_generate.extracted_file_context or "") + "\n" + (payload.context or ""))
+            
             async for event in agent.run_stream():
                 sse_event = format_sse_event(event)
-                if sse_event: yield sse_event
-                if event.get("status") == "complete": break
+                if sse_event: 
+                    yield sse_event
+                # Explicitly pass the qloo_insight event to the frontend
+                if event.get("status") == "qloo_insight":
+                    yield f"data: {json.dumps(event)}\n\n"
+                if event.get("status") == "complete": 
+                    break
             
             agent_final_data = agent.final_data if agent.final_data else {}
             
@@ -221,7 +226,6 @@ async def generate_full_report_stream(report_id: uuid.UUID, payload: ReportGener
                 if not save_report:
                     raise Exception("Report not found during save operation.")
                 
-                # Assign the analysis object with data from the LLM summary
                 save_report.analysis = models.ReportAnalysis(
                     report_id=save_report.id, 
                     cultural_compatibility_score=_safe_float(final_report_summary.get('cultural_compatibility_score')),
@@ -230,6 +234,7 @@ async def generate_full_report_stream(report_id: uuid.UUID, payload: ReportGener
                     corporate_ethos_summary=json.dumps(final_report_summary.get('corporate_ethos_summary', {})),
                     strategic_summary=final_report_summary.get('strategic_summary', 'Analysis failed.'),
                     financial_synthesis=final_report_summary.get('financial_synthesis', 'Analysis failed.'),
+                    persona_expansion_summary=json.dumps(agent_final_data.get('persona_expansion', {})),
                     acquirer_corporate_profile=str(agent_final_data.get('acquirer_culture_profile') or ""),
                     target_corporate_profile=str(agent_final_data.get('target_culture_profile') or ""),
                     acquirer_financial_profile=str(agent_final_data.get('acquirer_financial_profile') or ""),
@@ -243,8 +248,6 @@ async def generate_full_report_stream(report_id: uuid.UUID, payload: ReportGener
                     target_financial_sources=agent.all_sources.get('target_financial_sources', [])
                 )
 
-                # THE FIX: Directly assign clashes and growths from the agent's raw data.
-                # This ensures the deterministically generated lists are saved.
                 save_report.culture_clashes = [
                     models.CultureClash(report_id=save_report.id, **clash) 
                     for clash in agent_final_data.get('culture_clashes', [])
@@ -271,6 +274,7 @@ async def generate_full_report_stream(report_id: uuid.UUID, payload: ReportGener
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @router.get("/{report_id}/download-pdf")
+@rate_limiter(limit=30, seconds=60)
 async def download_report_pdf(report_id: uuid.UUID, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     """Generates and downloads a professional PDF report."""
     logger.info(f"User {current_user.email} requested PDF for report {report_id}")
@@ -291,13 +295,11 @@ async def download_report_pdf(report_id: uuid.UUID, session: AsyncSession = Depe
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found or not complete.")
 
     try:
-        # Fetch favicons concurrently
         acquirer_favicon_bytes, target_favicon_bytes = await asyncio.gather(
             fetch_favicon_bytes(report.acquirer_brand),
             fetch_favicon_bytes(report.target_brand)
         )
 
-        # Reconstruct the LLM summary payload for the PDF generator
         llm_summary = {
             "strategic_summary": report.analysis.strategic_summary,
             "financial_synthesis": report.analysis.financial_synthesis,
@@ -321,6 +323,7 @@ async def download_report_pdf(report_id: uuid.UUID, session: AsyncSession = Depe
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to generate PDF report.")
 
 @router.get("")
+@rate_limiter(limit=30, seconds=60)
 async def get_reports(session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     statement = (
         select(models.Report)
@@ -343,6 +346,7 @@ async def get_reports(session: AsyncSession = Depends(get_session), current_user
 
 
 @router.get("/{report_id}")
+@rate_limiter(limit=30, seconds=60)
 async def get_report(report_id: uuid.UUID, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     statement = select(models.Report).where(models.Report.id == report_id, models.Report.user_id == current_user.id).options(selectinload(models.Report.analysis), selectinload(models.Report.culture_clashes), selectinload(models.Report.untapped_growths))
     result = await session.execute(statement)
@@ -354,12 +358,14 @@ async def get_report(report_id: uuid.UUID, session: AsyncSession = Depends(get_s
 
 
 @router.delete("/{report_id}", status_code=status.HTTP_204_NO_CONTENT)
+@rate_limiter(limit=30, seconds=60)
 async def delete_report(report_id: uuid.UUID, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     report_to_delete = await session.get(models.Report, report_id)
     if not report_to_delete or report_to_delete.user_id != current_user.id: raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found")
     await session.delete(report_to_delete); await session.commit()
 
 @router.post("/{report_id}/chat", response_class=StreamingResponse)
+@rate_limiter(limit=30, seconds=60)
 async def chat_with_report(report_id: uuid.UUID, payload: ReportChatPayload, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     report = await session.get(models.Report, report_id)
     if not report or report.user_id != current_user.id: raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found.")

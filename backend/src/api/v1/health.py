@@ -1,6 +1,6 @@
 from fastapi import APIRouter, status
 from pydantic import BaseModel
-
+from fastapi_simple_rate_limiter import rate_limiter
 router = APIRouter()
 
 class HealthCheck(BaseModel):
@@ -15,5 +15,6 @@ class HealthCheck(BaseModel):
     summary="Perform a Health Check",
     description="Checks the operational status of the API service.",
 )
+@rate_limiter(limit=30, seconds=60)
 def health_check(app_version: str = "1.0.0"):
     return HealthCheck(status="ok", version=app_version)

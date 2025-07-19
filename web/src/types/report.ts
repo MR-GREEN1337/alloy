@@ -1,5 +1,5 @@
 export interface Report {
-  id: string; // Changed from number
+  id: string; 
   title: string;
   acquirer_brand: string;
   target_brand: string;
@@ -18,7 +18,8 @@ export interface ReportAnalysis {
   affinity_overlap_score: number;
   brand_archetype_summary: string | { acquirer_archetype?: string, target_archetype?: string }; 
   strategic_summary: string;
-  report_id: string; // Changed from number
+  report_id: string; 
+  persona_expansion_summary?: string | { expansion_score: number; latent_synergies: string[]; analysis: string };
   search_sources?: Array<{ title: string; url: string }>;
   acquirer_sources?: Array<{ title: string; url: string }>;
   target_sources?: Array<{ title: string; url: string }>;
@@ -28,7 +29,7 @@ export interface ReportAnalysis {
   target_corporate_profile?: string;
   corporate_ethos_summary?: string | { acquirer_ethos?: string, target_ethos?: string };
   acquirer_culture_sources?: Array<{ title: string; url: string }>;
-  target_culture_sources?: Array<{ title: string; url: string }>;
+  target_culture_sources?: Array<{ title:string; url: string }>;
   
   // Financial analysis fields
   acquirer_financial_profile?: string;
@@ -45,12 +46,12 @@ export interface CultureClash {
   topic: string;
   description: string;
   severity: ClashSeverity;
-  report_id: string; // Changed from number
+  report_id: string;
 }
 
 export interface UntappedGrowth {
   id: number;
   description: string;
   potential_impact_score: number;
-  report_id: string; // Changed from number
+  report_id: string;
 }

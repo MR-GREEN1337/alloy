@@ -33,7 +33,6 @@ class User(SQLModel, table=True):
     is_active: bool = Field(default=True)
     is_superuser: bool = Field(default=False)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), server_default=func.now(), nullable=False))
-    # THE FIX: Make updated_at non-optional and provide a default_factory
     updated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc), 
         sa_column=Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
@@ -58,12 +57,10 @@ class Report(SQLModel, table=True):
     status: ReportStatus = Field(default=ReportStatus.DRAFT, sa_column=Column(TEXT, nullable=False))
     extracted_file_context: Optional[str] = Field(default=None, sa_column=Column(TEXT))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column=Column(DateTime(timezone=True), server_default=func.now(), nullable=False))
-    # THE FIX: Make updated_at non-optional and provide a default_factory
     updated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         sa_column=Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     )
-    # Note: user_id still references the integer PK of the User table
     user_id: int = Field(foreign_key="user.id")
 
     user: "User" = SQLModelRelationship(sa_relationship=relationship("User", back_populates="reports"))
@@ -76,10 +73,13 @@ class ReportAnalysis(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     cultural_compatibility_score: float = Field(index=True)
     affinity_overlap_score: float
-    # THE FIX: Mark all LLM-generated text fields as Optional to handle generation failures.
     brand_archetype_summary: Optional[str] = Field(default=None, sa_column=Column(TEXT))
     strategic_summary: Optional[str] = Field(default=None, sa_column=Column(TEXT))
     report_id: uuid.UUID = Field(sa_column=Column(UUID(as_uuid=True), ForeignKey("report.id")))
+    
+    # --- ADDED THIS FIELD ---
+    persona_expansion_summary: Optional[str] = Field(default=None, sa_column=Column(TEXT))
+    
     search_sources: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON))
     acquirer_sources: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON))
     target_sources: Optional[List[Dict[str, Any]]] = Field(default=None, sa_column=Column(JSON))
@@ -121,12 +121,6 @@ class UntappedGrowth(SQLModel, table=True):
 
 
 # --- API Schemas ---
-# FIX: Create dedicated "Read" schemas for nested models to break circular
-# dependencies during serialization. The table models (e.g., ReportAnalysis)
-# contain back-references to the parent Report model, which causes an
-# infinite recursion loop when FastAPI tries to generate the response. These
-# Read models omit the problematic back-reference.
-
 class ReportAnalysisRead(SQLModel):
     id: Optional[int]
     cultural_compatibility_score: float
@@ -134,6 +128,10 @@ class ReportAnalysisRead(SQLModel):
     brand_archetype_summary: Optional[str]
     strategic_summary: Optional[str]
     report_id: uuid.UUID
+    
+    # --- ADDED THIS FIELD ---
+    persona_expansion_summary: Optional[str]
+    
     search_sources: Optional[List[Dict[str, Any]]]
     acquirer_sources: Optional[List[Dict[str, Any]]]
     target_sources: Optional[List[Dict[str, Any]]]
@@ -175,42 +173,33 @@ class ReportRead(SQLModel):
     created_at: datetime
     updated_at: datetime
     user_id: int
-    # Use the new Read schemas to prevent circular references
     analysis: Optional[ReportAnalysisRead] = None
     culture_clashes: List[CultureClashRead] = []
     untapped_growths: List[UntappedGrowthRead] = []
 
-# DEFINITIVE FIX: Function to resolve all forward references before DB operations.
 def rebuild_all_models():
     """
     This function forces the resolution of all forward-looking type hints
-    in SQLModel and Pydantic models. It's crucial to call this at startup
-    to prevent "type not defined" errors, especially in complex models
-    with inter-dependencies.
+    in SQLModel and Pydantic models.
     """
     logger.info("Rebuilding all model forward references...")
-    # This is crucial. We must rebuild all models that have relationships
-    # or forward references to ensure the type hints are resolved before FastAPI
-    # attempts to perform serialization. This is especially true for the
-    # DB models (User, Report, etc.) and the API models (ReportRead, etc.).
     User.model_rebuild()
     ReportAnalysis.model_rebuild()
     CultureClash.model_rebuild()
     UntappedGrowth.model_rebuild()
-    Report.model_rebuild() # Depends on the above
+    Report.model_rebuild()
 
     ReportCreate.model_rebuild()
     ReportAnalysisRead.model_rebuild()
     CultureClashRead.model_rebuild()
     UntappedGrowthRead.model_rebuild()
-    ReportRead.model_rebuild() # Depends on the ...Read models
+    ReportRead.model_rebuild()
     logger.success("Model forward references rebuilt successfully.")
 
 __all__ = [
     "User", "Report", "ReportAnalysis", "CultureClash", "UntappedGrowth",
     "ReportStatus", "ClashSeverity",
     "ReportCreate", "ReportRead",
-    # Add new read models to __all__ for good practice
     "ReportAnalysisRead", "CultureClashRead", "UntappedGrowthRead",
     "rebuild_all_models"
 ]

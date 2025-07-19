@@ -45,10 +45,15 @@ async def _extract_cultural_proxies(context: str, brand_name: str) -> List[str]:
         return []
     try:
         model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
-        # CORE FIX: Generalize the prompt to work for more than just media companies.
         prompt = f"""
-        Based *only* on the following text about '{brand_name}', identify the 3 to 5 most famous and culturally significant properties, products, shows, or public figures associated with them.
-        These items will be used as proxies to understand the brand's cultural footprint.
+        Based *only* on the provided text about '{brand_name}', identify the 3 to 5 most famous and culturally significant **named entities** associated with them.
+        Focus on concrete, searchable items:
+        - Specific products (e.g., "iPhone 15", "Air Jordan", "Model S")
+        - Hit movies, TV shows, or video games (e.g., "Stranger Things", "Call of Duty")
+        - Famous public figures or spokespeople (e.g., "Michael Jordan", "Taylor Swift")
+        - Well-known sub-brands (e.g., "Pixar", "Marvel Studios")
+
+        Do NOT return abstract concepts like "innovation" or "brand loyalty".
 
         CONTEXT:
         ---
@@ -67,7 +72,7 @@ async def _extract_cultural_proxies(context: str, brand_name: str) -> List[str]:
 
 
 async def _find_qloo_id(client: httpx.AsyncClient, entity_name: str) -> Optional[Tuple[str, str]]:
-    """Finds the Qloo ID and canonical name for any cultural entity."""
+    """Finds the Qloo ID and canonical name for any cultural entity with improved search categories and logging."""
     headers = {"x-api-key": settings.QLOO_API_KEY}
     entity_variations = list(set([
         entity_name,
@@ -78,19 +83,54 @@ async def _find_qloo_id(client: httpx.AsyncClient, entity_name: str) -> Optional
     for variation in entity_variations:
         if not variation: continue
         try:
-            # Search across multiple relevant categories
-            search_payload = {"query": variation, "filter": {"type": ["urn:entity:movie", "urn:entity:tv_show", "urn:entity:brand", "urn:entity:person", "urn:entity:music_track"]}, "take": 1}
+            # Broadened search categories for better match probability
+            search_payload = {
+                "query": variation, 
+                "filter": {
+                    "type": [
+                        "urn:entity:movie", 
+                        "urn:entity:tv_show", 
+                        "urn:entity:brand", 
+                        "urn:entity:person", 
+                        "urn:entity:music_track", 
+                        "urn:entity:music_artist", 
+                        "urn:entity:podcast",
+                        "urn:entity:video_game",
+                        "urn:entity:book"
+                    ]
+                }, 
+                "take": 1
+            }
             search_url = "https://hackathon.api.qloo.com/v2/search"
             resp = await client.post(search_url, json=search_payload, headers=headers)
-            if resp.status_code != 200: continue
+            
+            if resp.status_code != 200:
+                logger.warning(f"Qloo search for '{variation}' returned status {resp.status_code}.")
+                continue
+
             results = resp.json().get("data", [])
             if results:
                 qloo_id, found_name = results[0].get("id"), results[0].get("name")
                 logger.success(f"Found Qloo match for '{variation}': '{found_name}' (ID: {qloo_id})")
                 return qloo_id, found_name
-        except Exception:
-            logger.warning(f"Qloo ID search failed for variation '{variation}'.")
+        except Exception as e:
+            logger.error(f"Qloo ID search failed for variation '{variation}': {e}")
+            
+    logger.warning(f"Could not find any Qloo entity for search term: '{entity_name}'")
     return None
+
+async def _get_tastes_for_term(client: httpx.AsyncClient, term: str) -> Tuple[Optional[str], Set[str]]:
+    """Finds Qloo ID for a term and returns a tuple of (ID, set of its audience tastes)."""
+    qloo_info = await _find_qloo_id(client, term)
+    if qloo_info:
+        qloo_id = qloo_info[0]
+        tastes = await _get_qloo_tastes(client, qloo_id)
+        if tastes:
+            logger.info(f"Found {len(tastes)} tastes for '{term}' (ID: {qloo_id})")
+        else:
+            logger.warning(f"Found Qloo ID for '{term}' but it has no taste data.")
+        return qloo_id, {t['name'] for t in tastes if 'name' in t}
+    return None, set()
 
 async def _get_qloo_tastes(client: httpx.AsyncClient, qloo_id: str) -> List[Dict]:
     """Fetches the top 50 tastes for a given Qloo ID."""
@@ -105,14 +145,6 @@ async def _get_qloo_tastes(client: httpx.AsyncClient, qloo_id: str) -> List[Dict
         logger.error(f"Failed to fetch Qloo tastes for ID {qloo_id}: {e}")
         return []
 
-# --- THE FIX: Create a helper function for concurrent execution ---
-async def _get_tastes_for_term(client: httpx.AsyncClient, term: str) -> Set[str]:
-    """Finds Qloo ID for a term and returns a set of its audience tastes."""
-    qloo_info = await _find_qloo_id(client, term)
-    if qloo_info:
-        tastes = await _get_qloo_tastes(client, qloo_info[0])
-        return {t['name'] for t in tastes if 'name' in t}
-    return set()
 
 # --- Agent Tools ---
 
@@ -155,21 +187,33 @@ async def intelligent_cultural_analysis_tool(acquirer_brand_name: str, target_br
     acquirer_proxies = await _extract_cultural_proxies(acquirer_profile_result['context_str'], acquirer_brand_name)
     target_proxies = await _extract_cultural_proxies(target_profile_result['context_str'], target_brand_name)
 
-    # CORE FIX: Create a hybrid search list. Always include the original brand name as a fallback.
+    # Always include the original brand name as a fallback - this integrates the fallback logic directly
     acquirer_search_terms = list(set([acquirer_brand_name] + acquirer_proxies))
     target_search_terms = list(set([target_brand_name] + target_proxies))
     
     logger.info(f"Acquirer search terms for Qloo: {acquirer_search_terms}")
     logger.info(f"Target search terms for Qloo: {target_search_terms}")
 
-    # --- THE FIX: Execute all Qloo API calls concurrently ---
     async with httpx.AsyncClient(timeout=45.0) as client:
-        # Create a list of tasks for all acquirer terms
-        acquirer_tasks = [_get_tastes_for_term(client, term) for term in acquirer_search_terms]
-        # Create a list of tasks for all target terms
-        target_tasks = [_get_tastes_for_term(client, term) for term in target_search_terms]
+        semaphore = asyncio.Semaphore(3) # Limit to 3 concurrent requests at a time
 
-        # Run all tasks in parallel
+        async def get_tastes_with_semaphore(term):
+            async with semaphore:
+                # Add a small delay to be even more respectful to the API
+                await asyncio.sleep(0.1) 
+                return await _get_tastes_for_term_set(client, term)
+
+        async def _get_tastes_for_term_set(term: str) -> Set[str]:
+            """Helper to find Qloo ID for a term and return a set of its audience tastes."""
+            qloo_info = await _find_qloo_id(client, term)
+            if qloo_info:
+                tastes = await _get_qloo_tastes(client, qloo_info[0])
+                return {t['name'] for t in tastes if 'name' in t}
+            return set()
+
+        acquirer_tasks = [get_tastes_with_semaphore(term) for term in acquirer_search_terms]
+        target_tasks = [get_tastes_with_semaphore(term) for term in target_search_terms]
+
         logger.info(f"Running {len(acquirer_tasks) + len(target_tasks)} Qloo API calls concurrently...")
         acquirer_results, target_results = await asyncio.gather(
             asyncio.gather(*acquirer_tasks),
@@ -177,7 +221,6 @@ async def intelligent_cultural_analysis_tool(acquirer_brand_name: str, target_br
         )
         logger.success("All Qloo API calls completed.")
 
-    # Flatten the list of sets into a single set of tastes for each brand
     aggregated_acquirer_tastes = set().union(*acquirer_results)
     aggregated_target_tastes = set().union(*target_results)
 
@@ -190,7 +233,7 @@ async def intelligent_cultural_analysis_tool(acquirer_brand_name: str, target_br
     shared_tastes = list(aggregated_acquirer_tastes.intersection(aggregated_target_tastes))
     union_size = len(aggregated_acquirer_tastes.union(aggregated_target_tastes))
     unique_to_acquirer = list(aggregated_acquirer_tastes - aggregated_target_tastes)
-    # CORE FIX: The logic here was bugged, subtracting a set from itself.
+    # Fixed bug: correctly calculate unique_to_target
     unique_to_target = list(aggregated_target_tastes - aggregated_acquirer_tastes)
 
     culture_clashes = []
@@ -203,7 +246,7 @@ async def intelligent_cultural_analysis_tool(acquirer_brand_name: str, target_br
     for interest in shared_tastes[:5]:
         untapped_growths.append({"description": f"Both audience ecosystems show a strong affinity for '{interest}'. This shared passion could be a key pillar for joint marketing campaigns.", "potential_impact_score": 8})
 
-    # THE FIX: Add a new key to the return value specifically for streaming to the frontend.
+    # New key for streaming granular insights to the frontend
     qloo_insights_for_stream = {
         "shared": shared_tastes[:5],
         "acquirer_unique": unique_to_acquirer[:5],
@@ -225,39 +268,128 @@ async def intelligent_cultural_analysis_tool(acquirer_brand_name: str, target_br
         "sources": acquirer_profile_result.get('sources', []) + target_profile_result.get('sources', [])
     }
 
+async def persona_expansion_tool(acquirer_brand_name: str, target_brand_name: str) -> Dict[str, Any]:
+    """
+    NEW TOOL: Analyzes the latent synergy between two brands using Qloo's Persona API.
+    It predicts what the acquirer's audience might like and sees if the target already offers it.
+    This finds latent synergies by comparing predicted tastes against actual target tastes.
+    """
+    logger.info(f"AGENT TOOL: PERSONA EXPANSION for '{acquirer_brand_name}' vs '{target_brand_name}'")
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        # Step 1: Get cultural proxies and their Qloo IDs for both brands
+        acquirer_profile = await _web_search_tool(f"famous products and cultural properties of {acquirer_brand_name}")
+        acquirer_proxies = await _extract_cultural_proxies(acquirer_profile['context_str'], acquirer_brand_name)
+        acquirer_search_terms = list(set([acquirer_brand_name] + acquirer_proxies))
+
+        target_profile = await _web_search_tool(f"famous products and cultural properties of {target_brand_name}")
+        target_proxies = await _extract_cultural_proxies(target_profile['context_str'], target_brand_name)
+        target_search_terms = list(set([target_brand_name] + target_proxies))
+
+        # Concurrently find IDs and actual tastes for both
+        acquirer_tasks = [_get_tastes_for_term(client, term) for term in acquirer_search_terms]
+        target_tasks = [_get_tastes_for_term(client, term) for term in target_search_terms]
+        
+        acquirer_results, target_results = await asyncio.gather(
+            asyncio.gather(*acquirer_tasks),
+            asyncio.gather(*target_tasks)
+        )
+
+        acquirer_ids = [res[0] for res in acquirer_results if res[0]]
+        target_actual_tastes = set().union(*(res[1] for res in target_results))
+        
+        if not acquirer_ids or not target_actual_tastes:
+            return {"context_str": json.dumps({
+                "error": "Could not build a core persona or get target tastes for expansion analysis.",
+                "expansion_score": 0,
+                "latent_synergies": []
+            })}
+
+        # Step 2: Use Acquirer IDs to get predicted tastes from Persona API
+        logger.info(f"Building Acquirer Persona from IDs: {acquirer_ids}")
+        persona_payload = {
+            "include": {"id": acquirer_ids}, 
+            "category": ["tv_show", "movie", "brand", "person", "music_artist", "video_game"], 
+            "take": 100
+        }
+        headers = {"x-api-key": settings.QLOO_API_KEY}
+        persona_url = "https://hackathon.api.qloo.com/v2/persona/tastes"
+        
+        try:
+            resp = await client.post(persona_url, json=persona_payload, headers=headers)
+            resp.raise_for_status()
+            persona_tastes = resp.json().get("data", [])
+            acquirer_predicted_tastes = {t['name'] for t in persona_tastes if 'name' in t}
+            logger.success(f"Successfully fetched {len(acquirer_predicted_tastes)} predicted tastes for acquirer persona.")
+        except Exception as e:
+            logger.error(f"Persona API call failed: {e}")
+            return {"context_str": json.dumps({
+                "error": "Failed to get predicted tastes from Qloo Persona API.",
+                "expansion_score": 0,
+                "latent_synergies": []
+            })}
+        
+        # Step 3: Find the latent synergy
+        latent_synergy = acquirer_predicted_tastes.intersection(target_actual_tastes)
+        
+        # Step 4: Calculate the score and formulate the result
+        expansion_score = round((len(latent_synergy) / len(target_actual_tastes)) * 100, 2) if target_actual_tastes else 0
+        
+        result = {
+            "expansion_score": expansion_score,
+            "latent_synergies": list(latent_synergy)[:10],
+            "analysis": (
+                f"The acquirer's audience shows a strong predicted affinity for {len(latent_synergy)} of the target's core cultural products. "
+                f"This indicates an expansion potential of {expansion_score}%, suggesting {'high' if expansion_score > 15 else 'moderate' if expansion_score > 5 else 'low'} probability of successful audience adoption and cross-promotion."
+            ),
+            "acquirer_predicted_tastes_count": len(acquirer_predicted_tastes),
+            "target_actual_tastes_count": len(target_actual_tastes),
+            "synergy_count": len(latent_synergy)
+        }
+
+        return {"context_str": json.dumps(result)}
+
 # --- The Stateful ReAct Agent ---
 class AlloyReActAgent:
     PROMPT_TEMPLATE = """
-    You are a data-gathering AI assistant for a financial firm.
-    Your only job is to execute a sequence of tool calls to gather information about two companies and their cultural overlap.
-    Do not synthesize, analyze, or generate the final report yourself. Simply gather the data and pass it to the 'finish' tool.
+    You are a sophisticated strategic analyst AI for a financial firm specializing in M&A cultural analysis.
+    Your job is to execute a strategic sequence of tool calls to gather comprehensive data about two companies and their cultural overlap, synergies, and expansion potential.
+    Do not synthesize or generate the final report yourself. Simply gather the data methodically and pass it to the 'finish' tool.
 
-    **TOOLS:**
+    **STRATEGIC ANALYSIS WORKFLOW:**
+    1. Basic company profiling (web search for both companies)
+    2. Corporate culture analysis (for both companies)
+    3. Financial and market analysis (for both companies)
+    4. Deep cultural analysis using Qloo data (intelligent_cultural_analysis_tool)
+    5. Predictive expansion analysis using Persona API (persona_expansion_tool)
+
+    **AVAILABLE TOOLS:**
     - `web_search(query: str)`: For general company profile research.
     - `corporate_culture_tool(brand_name: str)`: To get specific information on a company's culture, values, and leadership.
     - `financial_and_market_tool(brand_name: str)`: To get specific information on a company's financial health and market position.
-    - `intelligent_cultural_analysis_tool(acquirer_brand_name: str, target_brand_name: str)`: For deep cultural analysis, finding clashes, and growth opportunities. THIS IS THE PRIMARY TOOL FOR CULTURAL DATA.
-    - `finish(gathered_data: dict)`: Use this ONLY when all data gathering steps are complete. The `gathered_data` parameter must be a JSON object containing keys for acquirer/target profiles, culture profiles, financial profiles, and the qloo analysis.
+    - `intelligent_cultural_analysis_tool(acquirer_brand_name: str, target_brand_name: str)`: For deep cultural analysis, finding clashes, and growth opportunities using Qloo data.
+    - `persona_expansion_tool(acquirer_brand_name: str, target_brand_name: str)`: For predictive analysis of latent synergies using Qloo's Persona API. Use this AFTER cultural analysis.
+    - `finish(gathered_data: dict)`: Use this ONLY when all strategic analysis steps are complete. The `gathered_data` parameter must be a JSON object containing keys for all previous analysis steps.
 
     **RESPONSE FORMAT (JSON ONLY):**
     You MUST respond with a single JSON object containing a "thought" and an "action".
-    The "action" MUST be an object with "tool_name" and "parameters".
     
     Example:
     ```json
     {{
-      "thought": "I need to get the general company profile for the acquirer.",
+      "thought": "I have completed the cultural analysis and found significant overlap. Now I should perform the persona expansion analysis to identify latent synergies and predictive growth opportunities.",
       "action": {{
-        "tool_name": "web_search",
+        "tool_name": "persona_expansion_tool",
         "parameters": {{
-          "query": "{acquirer_brand} company profile"
+          "acquirer_brand_name": "{acquirer_brand}",
+          "target_brand_name": "{target_brand}"
         }}
       }}
     }}
     ```
 
     **CURRENT TASK:**
-    Gather data for a report on the acquisition of target **{target_brand}** by acquirer **{acquirer_brand}**.
+    Conduct a comprehensive strategic analysis for the acquisition of target **{target_brand}** by acquirer **{acquirer_brand}**.
     User-provided context: {user_context}
 
     **COMPLETED STEPS:**
@@ -266,7 +398,7 @@ class AlloyReActAgent:
     **PREVIOUS ACTIONS LOG:**
     {scratchpad}
 
-    Based on the completed steps and previous actions, what is the next logical data-gathering action? Return ONLY the JSON object.
+    Based on the completed steps and previous actions, what is the next logical strategic analysis action? Focus on completing the workflow systematically. Return ONLY the JSON object.
     """
 
     def __init__(self, acquirer_brand: str, target_brand: str, user_context: str | None = None):
@@ -281,6 +413,7 @@ class AlloyReActAgent:
         self.tools = {
             "web_search": _web_search_tool,
             "intelligent_cultural_analysis_tool": intelligent_cultural_analysis_tool,
+            "persona_expansion_tool": persona_expansion_tool,
             "corporate_culture_tool": _corporate_culture_tool,
             "financial_and_market_tool": _financial_and_market_tool
         }
@@ -304,9 +437,9 @@ class AlloyReActAgent:
         )
 
     async def run_stream(self) -> AsyncGenerator[Dict[str, Any], None]:
-        max_turns = 10 
+        max_turns = 12  # Increased to accommodate the new tool
         for i in range(max_turns):
-            yield {"status": "thinking", "message": f"Agent reasoning (Step {i+1}/{max_turns})"}
+            yield {"status": "thinking", "message": f"Strategic analysis step {i+1}/{max_turns}"}
             
             prompt = self._build_prompt()
             response_text = await self._get_llm_response(prompt)
@@ -330,7 +463,6 @@ class AlloyReActAgent:
             if not tool_name:
                 observation = "Error: Your action JSON is missing the 'tool_name' key."
             elif tool_name == "finish":
-                # CORE FIX: The agent should pass its internally gathered data to the finish tool.
                 self.final_data = self.gathered_data
                 yield {"status": "complete"}
                 return
@@ -338,22 +470,51 @@ class AlloyReActAgent:
                 observation = f"Error: Unknown tool '{tool_name}'."
             else:
                 try:
-                    tool_result = await self.tools[tool_name](**params)
+                    tool_function = self.tools[tool_name]
+                    tool_result = await tool_function(**params)
+                    
                     observation = tool_result.get('context_str', f"Tool {tool_name} ran but provided no context.")
                     sources = tool_result.get('sources', [])
-                    
-                    # CORE FIX: Explicitly check params to determine the target and data key.
-                    # This is far more robust than parsing the query string.
+
+                    # Enhanced data flow: yield qloo_insight events for frontend
+                    if tool_name == "intelligent_cultural_analysis_tool" and "qloo_insights_for_stream" in tool_result:
+                        qloo_insights = tool_result["qloo_insights_for_stream"]
+                        yield {
+                            "status": "qloo_insight", 
+                            "payload": {
+                                "type": "cultural_analysis",
+                                "shared_tastes": qloo_insights.get("shared", []),
+                                "acquirer_unique_tastes": qloo_insights.get("acquirer_unique", []),
+                                "target_unique_tastes": qloo_insights.get("target_unique", [])
+                            }
+                        }
+
                     brand_name_param = params.get('brand_name') or params.get('acquirer_brand_name')
                     is_acquirer = brand_name_param == self.acquirer_brand
                     is_target = brand_name_param == self.target_brand
                     
-                    if tool_name == "web_search":
+                    if tool_name == "intelligent_cultural_analysis_tool":
+                        self.completed_steps.add("performed_intelligent_qloo_analysis")
+                        self.all_sources['search_sources'].extend(sources)
+                        try:
+                            self.gathered_data['qloo_analysis'] = json.loads(observation)
+                            self.gathered_data['culture_clashes'] = tool_result.get('culture_clashes', [])
+                            self.gathered_data['untapped_growths'] = tool_result.get('untapped_growths', [])
+                        except (json.JSONDecodeError, TypeError):
+                            self.gathered_data['qloo_analysis'] = {"error": observation}
+                    
+                    elif tool_name == "persona_expansion_tool":
+                        self.completed_steps.add("performed_persona_expansion")
+                        try:
+                             self.gathered_data['persona_expansion'] = json.loads(observation)
+                        except (json.JSONDecodeError, TypeError):
+                            self.gathered_data['persona_expansion'] = {"error": observation}
+                    
+                    elif tool_name == "web_search":
                         if is_acquirer:
                             self.completed_steps.add("searched_acquirer_profile")
                             self.gathered_data['acquirer_profile'] = observation
                             self.all_sources['acquirer_sources'].extend(sources)
-                        # The query could be for the target brand
                         elif self.target_brand in params.get('query', ''):
                             self.completed_steps.add("searched_target_profile")
                             self.gathered_data['target_profile'] = observation
@@ -379,26 +540,6 @@ class AlloyReActAgent:
                             self.gathered_data['target_financial_profile'] = observation
                             self.all_sources['target_financial_sources'].extend(sources)
 
-                    elif tool_name == "intelligent_cultural_analysis_tool":
-                        self.completed_steps.add("performed_intelligent_qloo_analysis")
-                        self.all_sources['search_sources'].extend(sources) # Add sources from proxy search
-                        
-                        # THE FIX: If the tool provides specific insights for streaming, yield them now.
-                        if 'qloo_insights_for_stream' in tool_result:
-                            yield {
-                                "status": "qloo_insight",
-                                "payload": tool_result['qloo_insights_for_stream']
-                            }
-                        
-                        try:
-                            self.gathered_data['qloo_analysis'] = json.loads(observation)
-                            self.gathered_data['culture_clashes'] = tool_result.get('culture_clashes', [])
-                            self.gathered_data['untapped_growths'] = tool_result.get('untapped_growths', [])
-                        except (json.JSONDecodeError, TypeError):
-                            self.gathered_data['qloo_analysis'] = {"error": observation}
-                            self.gathered_data['culture_clashes'] = []
-                            self.gathered_data['untapped_growths'] = []
-
                     for source in sources:
                         yield {"status": "source", "payload": source}
 
@@ -407,7 +548,7 @@ class AlloyReActAgent:
                     observation = f"Error: {e}"
 
             self.scratchpad += f"\nAction: {json.dumps(action_json)}\nObservation: {observation}"
-            yield {"status": "observation", "message": f"Observation from {tool_name}"}
+            yield {"status": "observation", "message": f"Completed {tool_name}"}
 
         logger.warning("Agent exceeded maximum turns.")
         self.final_data = self.gathered_data

@@ -9,6 +9,7 @@ from loguru import logger
 import uuid
 import random
 
+from fastapi_simple_rate_limiter import rate_limiter
 from src.core.security import (
     create_access_token,
     create_refresh_token,
@@ -110,6 +111,7 @@ async def create_user_if_not_exists(session: AsyncSession, user_data: Dict[str, 
 DBSession = Annotated[AsyncSession, Depends(get_session)]
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
+@rate_limiter(limit=30, seconds=60)
 async def register_user(user_create: UserCreate, session: DBSession):
     if await get_user_by_email(session, user_create.email):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Email already registered")
@@ -123,6 +125,7 @@ async def register_user(user_create: UserCreate, session: DBSession):
     return {"message": "User created successfully"}
 
 @router.post("/login", response_model=Token)
+@rate_limiter(limit=30, seconds=60)
 async def login_for_access_token(
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()], 
     session: DBSession
@@ -143,6 +146,7 @@ async def login_for_access_token(
     )
 
 @router.post("/refresh", response_model=TokenRefreshResponse)
+@rate_limiter(limit=30, seconds=60)
 async def refresh_access_token(
     refresh_request: TokenRefreshRequest,
     session: DBSession
@@ -188,6 +192,7 @@ async def google_authorize(request: Request):
 
 
 @router.get("/google/callback", tags=["auth"], response_class=RedirectResponse)
+@rate_limiter(limit=30, seconds=60)
 async def google_callback(
     request: Request, code: str, session: DBSession
 ):

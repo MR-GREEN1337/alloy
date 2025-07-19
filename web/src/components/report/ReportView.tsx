@@ -17,7 +17,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { AlertTriangle, TrendingUp, Zap, Link as LinkIcon, Globe, Users, Target, Scale, Briefcase, BarChart3, ShieldCheck } from "lucide-react";
+import { AlertTriangle, TrendingUp, Zap, Link as LinkIcon, Globe, Users, Target, Scale, Briefcase, BarChart3, CheckCircle } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Report, ClashSeverity, ReportAnalysis } from "@/types/report";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
@@ -43,13 +43,13 @@ const useParsedReport = (report: Report) => {
         const parsedReport = { ...report };
         if (report.analysis) {
             const mutableAnalysis = { ...report.analysis };
-            const keys_to_parse = ['brand_archetype_summary', 'corporate_ethos_summary'];
+            const keys_to_parse = ['brand_archetype_summary', 'corporate_ethos_summary', 'persona_expansion_summary'];
             for (const key of keys_to_parse) {
                 if (typeof (mutableAnalysis as any)[key] === 'string') {
                     try {
                         (mutableAnalysis as any)[key] = JSON.parse((mutableAnalysis as any)[key]);
                     } catch (e) {
-                        console.error(`Failed to parse ${key}:`, e);
+                        console.error(`Failed to parse ${key}:`, (mutableAnalysis as any)[key]);
                         (mutableAnalysis as any)[key] = {};
                     }
                 }
@@ -341,6 +341,41 @@ const FinancialAnalysis = ({ report }: { report: Report }) => {
     );
 };
 
+const ExpansionPotentialCard = ({ report }: { report: Report }) => {
+    if (!report.analysis?.persona_expansion_summary) return null;
+
+    const expansionData = report.analysis.persona_expansion_summary as { expansion_score: number; latent_synergies: string[]; analysis: string };
+
+    if (!expansionData || expansionData.expansion_score === undefined) return null;
+
+    return (
+        <Card>
+            <CardHeader>
+                <CardTitle className="flex items-center gap-2"><Zap className="text-yellow-400"/>Audience Expansion Potential</CardTitle>
+                <CardDescription>Predicted synergies based on Qloo's Persona API, revealing latent growth opportunities.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid md:grid-cols-2 gap-6 items-center">
+                <div className="flex flex-col items-center justify-center">
+                    <div className="text-6xl font-bold text-yellow-400">{expansionData.expansion_score.toFixed(1)}%</div>
+                    <div className="text-sm font-medium text-muted-foreground mt-1">Latent Synergy Score</div>
+                </div>
+                <div>
+                    <h4 className="font-semibold mb-2">Top Predicted Affinities</h4>
+                    <p className="text-sm text-muted-foreground mb-3">{expansionData.analysis}</p>
+                    <div className="space-y-2">
+                        {expansionData.latent_synergies.map(item => (
+                            <div key={item} className="flex items-center gap-2 text-xs text-foreground">
+                                <CheckCircle className="h-3 w-3 text-green-500" />
+                                {item}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </CardContent>
+        </Card>
+    );
+}
+
 export const ReportView = ({ report, children }: ReportViewProps) => {
     const parsedReport = useParsedReport(report);
 
@@ -373,6 +408,7 @@ export const ReportView = ({ report, children }: ReportViewProps) => {
                     <div className="space-y-6">
                         <ReportHeader report={parsedReport} children={children} />
                         <ScoreAndArchetypes report={parsedReport} />
+                        <ExpansionPotentialCard report={parsedReport} />
 
                         <Tabs defaultValue="affinity">
                             <TabsList>

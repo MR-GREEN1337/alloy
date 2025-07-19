@@ -73,16 +73,15 @@ const QlooInsightsPanel = ({ insights, acquirer, target }: { insights: QlooInsig
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div>
                 <h4 className="font-medium text-xs text-muted-foreground flex items-center gap-1.5 mb-2"><TrendingUp className="h-3 w-3 text-green-500" />Shared Affinities</h4>
-                <div className="space-y-1">{insights.shared.map(item => <p key={item} className="text-xs text-foreground truncate">{item}</p>)}</div>
+                <div className="space-y-1">{insights.shared.map(item => <p key={item} className="text-xs text-foreground truncate" title={item}>{item}</p>)}</div>
             </div>
-            <Separator orientation="vertical" className="hidden md:block" />
-            <div>
-                <h4 className="font-medium text-xs text-muted-foreground mb-2">{acquirer} Unique</h4>
-                <div className="space-y-1">{insights.acquirer_unique.map(item => <p key={item} className="text-xs text-foreground truncate">{item}</p>)}</div>
+            <div className="md:border-l md:pl-4">
+                <h4 className="font-medium text-xs text-muted-foreground mb-2">{acquirer} Unique Tastes</h4>
+                <div className="space-y-1">{insights.acquirer_unique.map(item => <p key={item} className="text-xs text-foreground truncate" title={item}>{item}</p>)}</div>
             </div>
-             <div>
-                <h4 className="font-medium text-xs text-muted-foreground mb-2">{target} Unique</h4>
-                <div className="space-y-1">{insights.target_unique.map(item => <p key={item} className="text-xs text-foreground truncate">{item}</p>)}</div>
+             <div className="md:border-l md:pl-4">
+                <h4 className="font-medium text-xs text-muted-foreground mb-2">{target} Unique Tastes</h4>
+                <div className="space-y-1">{insights.target_unique.map(item => <p key={item} className="text-xs text-foreground truncate" title={item}>{item}</p>)}</div>
             </div>
         </div>
     </motion.div>
@@ -145,7 +144,7 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
     const { accessToken, apiUrl } = useAuth();
     const API_URL = apiUrl;
 
-    const [draftReportId, setDraftReportId] = useState<number | null>(null);
+    const [draftReportId, setDraftReportId] = useState<string | null>(null);
     const [acquirer, setAcquirer] = useState("");
     const [target, setTarget] = useState("");
     const [notes, setNotes] = useState("");
@@ -221,9 +220,15 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
                     if (line.startsWith('data: ')) {
                         const jsonData = JSON.parse(line.substring(6));
                         const newStep: Step = { id: `step-${Date.now()}-${Math.random()}`, ...jsonData };
-                        if (newStep.status === 'source') { setSources(prev => [...prev, newStep]); } 
-                        else if (newStep.status === 'qloo_insight') { setQlooInsights(newStep.payload); setLogSteps(prev => [...prev, newStep]); }
-                        else { setLogSteps(prev => [...prev, newStep]); }
+                        
+                        if (newStep.status === 'source') { 
+                            setSources(prev => [...prev, newStep]); 
+                        } else if (newStep.status === 'qloo_insight') {
+                            setQlooInsights(newStep.payload);
+                            setLogSteps(prev => [...prev, { ...newStep, message: "Qloo analysis complete." }]);
+                        } else { 
+                            setLogSteps(prev => [...prev, newStep]); 
+                        }
                         
                         if (newStep.status === 'complete') {
                             toast.success("Report generated successfully!");
