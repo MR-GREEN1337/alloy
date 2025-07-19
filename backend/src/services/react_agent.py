@@ -88,15 +88,16 @@ async def _find_qloo_id(client: httpx.AsyncClient, entity_name: str) -> Optional
                 "query": variation, 
                 "filter": {
                     "type": [
-                        "urn:entity:movie", 
-                        "urn:entity:tv_show", 
-                        "urn:entity:brand", 
-                        "urn:entity:person", 
-                        "urn:entity:music_track", 
-                        "urn:entity:music_artist", 
+                        "urn:entity:artist",
+                        "urn:entity:book",
+                        "urn:entity:brand",
+                        "urn:entity:destination",
+                        "urn:entity:movie",
+                        "urn:entity:person",
+                        "urn:entity:place",
                         "urn:entity:podcast",
+                        "urn:entity:tv_show",
                         "urn:entity:video_game",
-                        "urn:entity:book"
                     ]
                 }, 
                 "take": 1
@@ -139,6 +140,7 @@ async def _get_qloo_tastes(client: httpx.AsyncClient, qloo_id: str) -> List[Dict
         insights_payload = {"id": [qloo_id], "take": 50}
         insights_url = "https://hackathon.api.qloo.com/v2/insights"
         resp = await client.post(insights_url, json=insights_payload, headers=headers)
+        logger.info(f"Qloo tastes for ID {qloo_id}: {resp.json()}")
         resp.raise_for_status()
         return resp.json().get("data", [])
     except Exception as e:
@@ -203,7 +205,7 @@ async def intelligent_cultural_analysis_tool(acquirer_brand_name: str, target_br
                 await asyncio.sleep(0.1) 
                 return await _get_tastes_for_term_set(client, term)
 
-        async def _get_tastes_for_term_set(term: str) -> Set[str]:
+        async def _get_tastes_for_term_set(client: httpx.AsyncClient, term: str) -> Set[str]:
             """Helper to find Qloo ID for a term and return a set of its audience tastes."""
             qloo_info = await _find_qloo_id(client, term)
             if qloo_info:

@@ -83,7 +83,7 @@ async def fetch_favicon_bytes(brand_name: str) -> Optional[bytes]:
         return None
 
 @router.get("/favicon", response_class=RedirectResponse, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
-@rate_limiter(limit=30, seconds=60)
+@rate_limiter(limit=200, seconds=60)
 async def get_favicon(
     url: Optional[str] = Query(None),
     brandName: Optional[str] = Query(None)

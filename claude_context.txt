@@ -511,6 +511,7 @@ from loguru import logger
 import uuid
 import random
 
+from fastapi_simple_rate_limiter import rate_limiter
 from src.core.security import (
     create_access_token,
     create_refresh_token,
@@ -612,6 +613,7 @@ async def create_user_if_not_exists(session: AsyncSession, user_data: Dict[str, 
 DBSession = Annotated[AsyncSession, Depends(get_session)]
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
+@rate_limiter(limit=30, seconds=60)
 async def register_user(user_create: UserCreate, session: DBSession):
     if await get_user_by_email(session, user_create.email):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Email already registered")
@@ -625,6 +627,7 @@ async def register_user(user_create: UserCreate, session: DBSession):
     return {"message": "User created successfully"}
 
 @router.post("/login", response_model=Token)
+@rate_limiter(limit=30, seconds=60)
 async def login_for_access_token(
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()], 
     session: DBSession
@@ -645,6 +648,7 @@ async def login_for_access_token(
     )
 
 @router.post("/refresh", response_model=TokenRefreshResponse)
+@rate_limiter(limit=30, seconds=60)
 async def refresh_access_token(
     refresh_request: TokenRefreshRequest,
     session: DBSession
@@ -690,6 +694,7 @@ async def google_authorize(request: Request):
 
 
 @router.get("/google/callback", tags=["auth"], response_class=RedirectResponse)
+@rate_limiter(limit=30, seconds=60)
 async def google_callback(
     request: Request, code: str, session: DBSession
 ):
@@ -803,7 +808,7 @@ async def get_current_user(
 File: backend/src/api/v1/health.py
 from fastapi import APIRouter, status
 from pydantic import BaseModel
-
+from fastapi_simple_rate_limiter import rate_limiter
 router = APIRouter()
 
 class HealthCheck(BaseModel):
@@ -818,6 +823,7 @@ class HealthCheck(BaseModel):
     summary="Perform a Health Check",
     description="Checks the operational status of the API service.",
 )
+@rate_limiter(limit=30, seconds=60)
 def health_check(app_version: str = "1.0.0"):
     return HealthCheck(status="ok", version=app_version)-e 
 -e
@@ -847,6 +853,7 @@ from loguru import logger
 
 from src.core.settings import get_settings
 from src.services.search import find_official_website
+from fastapi_simple_rate_limiter import rate_limiter
 
 router = APIRouter()
 settings = get_settings()
@@ -921,6 +928,7 @@ async def fetch_favicon_bytes(brand_name: str) -> Optional[bytes]:
         return None
 
 @router.get("/favicon", response_class=RedirectResponse, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+@rate_limiter(limit=200, seconds=60)
 async def get_favicon(
     url: Optional[str] = Query(None),
     brandName: Optional[str] = Query(None)
@@ -985,6 +993,7 @@ from src.services.docling import process_document_with_docling
 from src.services.report_generator import generate_chat_response
 from src.services.pdf_generator import create_report_pdf
 from loguru import logger
+from fastapi_simple_rate_limiter import rate_limiter
 
 router = APIRouter()
 settings = get_settings()
@@ -1096,6 +1105,7 @@ async def synthesize_final_report(agent_data: dict) -> dict:
 
 # --- API Endpoints ---
 @router.post("/draft", response_model=DraftReportResponse, status_code=status.HTTP_201_CREATED)
+@rate_limiter(limit=30, seconds=60)
 async def create_draft_report(session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     logger.info(f"User {current_user.email} creating new draft report.")
     new_report = models.Report(user_id=current_user.id, status=models.ReportStatus.DRAFT)
@@ -1106,6 +1116,7 @@ async def create_draft_report(session: AsyncSession = Depends(get_session), curr
     return new_report
 
 @router.post("/{report_id}/upload_context_file", response_model=FileUploadResponse)
+@rate_limiter(limit=30, seconds=60)
 async def upload_context_file(report_id: uuid.UUID, file: UploadFile = File(...), session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     report = await session.get(models.Report, report_id)
     if not report or report.user_id != current_user.id:
@@ -1117,6 +1128,7 @@ async def upload_context_file(report_id: uuid.UUID, file: UploadFile = File(...)
     return FileUploadResponse(filename=file.filename, content_type=file.content_type or "application/octet-stream", size_in_bytes=file.size)
 
 @router.post("/{report_id}/generate")
+@rate_limiter(limit=30, seconds=60)
 async def generate_full_report_stream(report_id: uuid.UUID, payload: ReportGeneratePayload, current_user: models.User = Depends(get_current_user)):
     
     async def event_generator() -> AsyncGenerator[str, None]:
@@ -1235,6 +1247,7 @@ async def generate_full_report_stream(report_id: uuid.UUID, payload: ReportGener
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @router.get("/{report_id}/download-pdf")
+@rate_limiter(limit=30, seconds=60)
 async def download_report_pdf(report_id: uuid.UUID, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     """Generates and downloads a professional PDF report."""
     logger.info(f"User {current_user.email} requested PDF for report {report_id}")
@@ -1283,6 +1296,7 @@ async def download_report_pdf(report_id: uuid.UUID, session: AsyncSession = Depe
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to generate PDF report.")
 
 @router.get("")
+@rate_limiter(limit=30, seconds=60)
 async def get_reports(session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     statement = (
         select(models.Report)
@@ -1305,6 +1319,7 @@ async def get_reports(session: AsyncSession = Depends(get_session), current_user
 
 
 @router.get("/{report_id}")
+@rate_limiter(limit=30, seconds=60)
 async def get_report(report_id: uuid.UUID, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     statement = select(models.Report).where(models.Report.id == report_id, models.Report.user_id == current_user.id).options(selectinload(models.Report.analysis), selectinload(models.Report.culture_clashes), selectinload(models.Report.untapped_growths))
     result = await session.execute(statement)
@@ -1316,12 +1331,14 @@ async def get_report(report_id: uuid.UUID, session: AsyncSession = Depends(get_s
 
 
 @router.delete("/{report_id}", status_code=status.HTTP_204_NO_CONTENT)
+@rate_limiter(limit=30, seconds=60)
 async def delete_report(report_id: uuid.UUID, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     report_to_delete = await session.get(models.Report, report_id)
     if not report_to_delete or report_to_delete.user_id != current_user.id: raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found")
     await session.delete(report_to_delete); await session.commit()
 
 @router.post("/{report_id}/chat", response_class=StreamingResponse)
+@rate_limiter(limit=30, seconds=60)
 async def chat_with_report(report_id: uuid.UUID, payload: ReportChatPayload, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     report = await session.get(models.Report, report_id)
     if not report or report.user_id != current_user.id: raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found.")
@@ -1460,15 +1477,16 @@ async def _find_qloo_id(client: httpx.AsyncClient, entity_name: str) -> Optional
                 "query": variation, 
                 "filter": {
                     "type": [
-                        "urn:entity:movie", 
-                        "urn:entity:tv_show", 
-                        "urn:entity:brand", 
-                        "urn:entity:person", 
-                        "urn:entity:music_track", 
-                        "urn:entity:music_artist", 
+                        "urn:entity:artist",
+                        "urn:entity:book",
+                        "urn:entity:brand",
+                        "urn:entity:destination",
+                        "urn:entity:movie",
+                        "urn:entity:person",
+                        "urn:entity:place",
                         "urn:entity:podcast",
+                        "urn:entity:tv_show",
                         "urn:entity:video_game",
-                        "urn:entity:book"
                     ]
                 }, 
                 "take": 1
@@ -1511,6 +1529,7 @@ async def _get_qloo_tastes(client: httpx.AsyncClient, qloo_id: str) -> List[Dict
         insights_payload = {"id": [qloo_id], "take": 50}
         insights_url = "https://hackathon.api.qloo.com/v2/insights"
         resp = await client.post(insights_url, json=insights_payload, headers=headers)
+        logger.info(f"Qloo tastes for ID {qloo_id}: {resp.json()}")
         resp.raise_for_status()
         return resp.json().get("data", [])
     except Exception as e:
@@ -1575,7 +1594,7 @@ async def intelligent_cultural_analysis_tool(acquirer_brand_name: str, target_br
                 await asyncio.sleep(0.1) 
                 return await _get_tastes_for_term_set(client, term)
 
-        async def _get_tastes_for_term_set(term: str) -> Set[str]:
+        async def _get_tastes_for_term_set(client: httpx.AsyncClient, term: str) -> Set[str]:
             """Helper to find Qloo ID for a term and return a set of its audience tastes."""
             qloo_info = await _find_qloo_id(client, term)
             if qloo_info:
