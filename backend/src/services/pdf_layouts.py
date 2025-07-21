@@ -162,7 +162,7 @@ def create_clashes_table(report, doc_width, styles):
         data.append([
             Paragraph(clash.topic, styles['default']),
             Paragraph(clash.description, styles['default']),
-            Paragraph(clash.severity.value, styles['default'])
+            Paragraph(clash.severity, styles['default'])
         ])
         
     table = Table(data, colWidths=[doc_width * 0.2, doc_width * 0.6, doc_width * 0.2])

@@ -8,7 +8,7 @@ class HealthCheck(BaseModel):
     version: str
 
 @router.get(
-    "/health",
+    "/",
     response_model=HealthCheck,
     status_code=status.HTTP_200_OK,
     tags=["Health"],

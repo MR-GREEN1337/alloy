@@ -266,8 +266,12 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
                         {sources.length > 0 && <Collapsible open={isCollapsibleOpen} onOpenChange={setIsCollapsibleOpen}>
                             <CollapsibleTrigger className="w-full p-2 rounded-md hover:bg-muted/50 text-left">
                                 <div className="flex items-center justify-between"><div className="flex items-center gap-2 overflow-hidden"><Search className="h-4 w-4 text-blue-500 flex-shrink-0"/><span className="text-sm font-medium">Found {sources.length} sources</span>
-                                <div className="flex items-center gap-1.5 flex-shrink min-w-0">
-                                    {sources.map(source => <FaviconPreview key={source.id} url={source.payload.url}/>)}
+                                <div className="flex items-center -space-x-1 flex-shrink min-w-0">
+                                    {sources.map(source => (
+                                        <div key={source.id} className="relative flex h-4 w-4 items-center justify-center rounded-full ring-2 ring-background">
+                                            <FaviconPreview url={source.payload.url}/>
+                                        </div>
+                                    ))}
                                 </div>
                                 </div><span className="text-xs text-muted-foreground">{isCollapsibleOpen ? 'Collapse' : 'Expand'}</span></div>
                             </CollapsibleTrigger>

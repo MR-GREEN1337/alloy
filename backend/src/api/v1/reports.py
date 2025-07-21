@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
-from typing import List, Optional, AsyncGenerator
+from typing import List, Optional, AsyncGenerator, Dict
 from sqlmodel import select, SQLModel
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,7 +41,7 @@ class DraftReportResponse(SQLModel):
     user_id: int
 
 class ReportChatPayload(SQLModel):
-    query: str
+    messages: List[Dict[str, str]]
     context: str
 
 class FileUploadResponse(SQLModel):
@@ -77,11 +77,19 @@ async def synthesize_final_report(agent_data: dict) -> dict:
     Takes the agent's gathered data, uses an LLM to synthesize qualitative summaries,
     and then programmatically adds the quantitative scores for a reliable final report.
     """
-    logger.info("Synthesizing final report from agent data.")
+    logger.info("Synthesizing final report from agent data.", agent_data)
     
+    # --- CORRECTED SCORE CALCULATION ---
+    # Fetch both core analysis components from the agent's gathered data.
     qloo_analysis = agent_data.get('qloo_analysis', {})
+    persona_expansion = agent_data.get('persona_expansion', {})
+
+    # Safely extract the quantitative scores.
     affinity_score = _safe_float(qloo_analysis.get('affinity_overlap_score', 0.0))
-    cultural_score = affinity_score
+    expansion_score = _safe_float(persona_expansion.get('expansion_score', 0.0))
+
+    cultural_score = (0.6 * affinity_score) + (0.4 * expansion_score)
+    cultural_score = round(min(cultural_score, 100.0), 1) # Clamp score to a max of 100.
     
     data_for_synthesis = {
         key: value for key, value in agent_data.items() 
@@ -371,7 +379,7 @@ async def chat_with_report(report_id: uuid.UUID, payload: ReportChatPayload, ses
     if not report or report.user_id != current_user.id: raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found.")
     async def stream_response():
         try:
-            async for chunk in generate_chat_response(payload.query, payload.context): yield chunk
+            async for chunk in generate_chat_response(payload.messages, payload.context): yield chunk
         except Exception as e:
             logger.error(f"Error during chat stream for report {report_id}: {e}")
             yield "Sorry, I encountered an error while processing your request."

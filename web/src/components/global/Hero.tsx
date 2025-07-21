@@ -395,7 +395,7 @@ export const AlloyHeroSection: React.FC = () => {
             <motion.div
               //@ts-ignore
               variants={itemVariants}
-              className="flex items-center space-x-2 px-4 py-2 bg-white/5 hover:bg-white/10 backdrop-blur-sm rounded-full text-sm mb-6 transition-all duration-300 group"
+              className="flex items-center space-x-2 px-4 py-2 mt-10 bg-white/5 hover:bg-white/10 backdrop-blur-sm rounded-full text-sm mb-6 transition-all duration-300 group"
             >
               <span>The New Paradigm of Cultural Due Diligence</span>
             </motion.div>

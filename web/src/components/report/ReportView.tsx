@@ -24,10 +24,11 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { AIAnalystChat } from "./AIAnalystChat";
 import Image from "next/image";
 import Link from "next/link";
-import { Bar, BarChart, ResponsiveContainer, XAxis, YAxis, Tooltip, RadialBar, RadialBarChart } from 'recharts';
+import { Bar, BarChart, ResponsiveContainer, XAxis, YAxis, Tooltip, RadialBar, RadialBarChart, PolarAngleAxis } from 'recharts';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ChartContainer } from "../ui/chart";
 import { ScrollArea } from "../ui/scroll-area";
+import { Tooltip as TooltipPrimitive, TooltipContent as TooltipContentPrimitive, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import React, { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
@@ -60,12 +61,17 @@ const useParsedReport = (report: Report) => {
     }, [report]);
 };
 
-const CompanyLogo = ({ brandName }: { brandName: string }) => {
+const CompanyLogo = ({ brandName, size = 'large' }: { brandName: string, size?: 'large' | 'small' }) => {
     const faviconUrl = `/api/v1/utils/favicon?brandName=${encodeURIComponent(brandName)}`;
+    const config = {
+        large: { dim: 40, text: 'text-xl', padding: 'p-1', gap: 'gap-3' },
+        small: { dim: 24, text: 'text-base', padding: 'p-0.5', gap: 'gap-2' },
+    }[size];
+
     return (
-        <div className="flex items-center gap-3">
-            <Image src={faviconUrl} alt={`${brandName} logo`} width={40} height={40} className="rounded-lg border bg-background p-1" unoptimized priority={false}/>
-            <span className="text-xl font-semibold">{brandName}</span>
+        <div className={cn("flex items-center", config.gap)}>
+            <Image src={faviconUrl} alt={`${brandName} logo`} width={config.dim} height={config.dim} className={cn("rounded-lg border bg-background", config.padding)} unoptimized priority={false}/>
+            <span className={cn("font-semibold", config.text)}>{brandName}</span>
         </div>
     );
 };
@@ -94,6 +100,58 @@ const SourcePill = ({ url }: { url: string }) => {
         return <Link href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-full border bg-secondary/50 px-3 py-1 text-sm text-secondary-foreground transition-colors hover:bg-secondary"><LinkIcon className="h-4 w-4" />{url}</Link>
     }
 }
+
+const DimensionItem = ({ text, icon: Icon, colorClass, tooltipContent }: { text: string; icon: React.ElementType; colorClass: string; tooltipContent: string; }) => (
+    <TooltipProvider>
+        <TooltipPrimitive>
+            <TooltipTrigger asChild>
+                <div className="flex items-start gap-3 p-2 rounded-md transition-colors hover:bg-muted/50 w-full text-left">
+                    <div className={cn("flex-shrink-0 mt-1 w-4 h-4 flex items-center justify-center rounded-full", colorClass)}>
+                        <Icon className="h-2.5 w-2.5 text-white" />
+                    </div>
+                    <p className="text-sm text-foreground truncate">{text}</p>
+                </div>
+            </TooltipTrigger>
+            <TooltipContentPrimitive side="top" align="start" className="max-w-xs">
+                <p>{tooltipContent}</p>
+            </TooltipContentPrimitive>
+        </TooltipPrimitive>
+    </TooltipProvider>
+);
+
+const CulturalDimensionsVisual = ({ report }: { report: Report }) => {
+    const acquirerUnique = report.culture_clashes.filter(c => c.description.includes("Acquirer"));
+    const targetUnique = report.culture_clashes.filter(c => c.description.includes("Target"));
+    const shared = report.untapped_growths;
+
+    const columnHeaderClasses = "font-semibold text-foreground flex items-center gap-2 mb-3";
+
+    return (
+        <Card>
+            <CardHeader>
+                <CardTitle className="flex items-center gap-2"><Users /> Cultural Taste Dimensions</CardTitle>
+                <CardDescription>A breakdown of unique and shared affinities between the two brand audiences.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid md:grid-cols-3 gap-px bg-border border rounded-lg overflow-hidden">
+                <div className="p-4 bg-card"><div className={columnHeaderClasses}><CompanyLogo brandName={report.acquirer_brand} size="small"/><span>Unique</span></div>
+                    <ScrollArea className="h-64 pr-3"><div className="space-y-1">
+                        {acquirerUnique.length > 0 ? acquirerUnique.map(clash => (<DimensionItem key={clash.id} text={clash.topic} icon={AlertTriangle} colorClass="bg-blue-500" tooltipContent={clash.description}/>)) : <p className="text-sm text-muted-foreground p-2">No unique tastes identified.</p>}
+                    </div></ScrollArea>
+                </div>
+                <div className="p-4 bg-card"><div className={columnHeaderClasses}><Zap className="text-green-500" /><span>Shared Affinities</span></div>
+                    <ScrollArea className="h-64 pr-3"><div className="space-y-1">
+                        {shared.length > 0 ? shared.map(growth => (<DimensionItem key={growth.id} text={growth.description.match(/'([^']*)'/)?.[1] || "Growth Opportunity"} icon={TrendingUp} colorClass="bg-green-500" tooltipContent={growth.description}/>)) : <p className="text-sm text-muted-foreground p-2">No shared affinities identified.</p>}
+                    </div></ScrollArea>
+                </div>
+                <div className="p-4 bg-card"><div className={columnHeaderClasses}><CompanyLogo brandName={report.target_brand} size="small"/><span>Unique</span></div>
+                    <ScrollArea className="h-64 pr-3"><div className="space-y-1">
+                        {targetUnique.length > 0 ? targetUnique.map(clash => (<DimensionItem key={clash.id} text={clash.topic} icon={AlertTriangle} colorClass="bg-purple-500" tooltipContent={clash.description}/>)) : <p className="text-sm text-muted-foreground p-2">No unique tastes identified.</p>}
+                    </div></ScrollArea>
+                </div>
+            </CardContent>
+        </Card>
+    );
+};
 
 
 // --- Main View Sections ---
@@ -135,14 +193,17 @@ const ScoreAndArchetypes = ({ report }: { report: Report }) => {
                 </CardHeader>
                 <CardContent className="flex items-center justify-center">
                     <ChartContainer config={{}} className="mx-auto aspect-square h-[200px] w-[200px]">
-                        <RadialBarChart 
+                        <RadialBarChart
                             data={chartData} 
-                            startAngle={-270} 
-                            endAngle={90} 
+                            cx="50%"
+                            cy="50%"
+                            startAngle={90} 
+                            endAngle={-270} 
                             innerRadius="80%" 
                             outerRadius="100%" 
                             barSize={30}
                         >
+                            <PolarAngleAxis type="number" domain={[0, 100]} tick={false} />
                             <RadialBar dataKey="value" background={{ fill: 'hsl(var(--muted))' }} cornerRadius={15} />
                             <text x="50%" y="50%" textAnchor="middle" dominantBaseline="middle" className="fill-foreground text-5xl font-bold">
                                 {analysis.cultural_compatibility_score.toFixed(0)}
@@ -179,13 +240,7 @@ const AffinityAnalysis = ({ report }: { report: Report }) => {
     if (!report.analysis) return null
     const shared = report.untapped_growths.slice(0, 5).map(g => ({ name: g.description.match(/'([^']*)'/)?.[1] || g.description.substring(0,20), score: g.potential_impact_score * 10 }));
     const acquirer_unique = report.culture_clashes.filter(c => c.description.includes("Acquirer")).slice(0, 5).map(c => ({ name: c.topic, score: 75 }));
-    const target_unique = report.culture_clashes.filter(c => c.description.includes("Target")).slice(0, 5).map(c => ({ name: c.topic, score: 75 }));
-
-    const combinedData = [
-        ...shared.map(item => ({ ...item, type: 'Shared' })),
-        ...acquirer_unique.map(item => ({ ...item, type: 'Acquirer' })),
-        ...target_unique.map(item => ({ ...item, type: 'Target' })),
-    ].sort((a,b) => b.score - a.score);
+    const target_unique = report.culture_clashes.filter(c => c.description.includes("Target")).slice(0, 5).map(c => ({ name: c.topic, score: 75 }));;
 
     const chartData = [
         { name: report.acquirer_brand, value: acquirer_unique.length, fill: '#3b82f6' },
@@ -194,11 +249,16 @@ const AffinityAnalysis = ({ report }: { report: Report }) => {
     ];
 
     return (
-        <div className="grid md:grid-cols-2 gap-6">
-            <Card className="col-span-1">
+        <div className="space-y-6">
+            <Card>
                 <CardHeader>
-                    <CardTitle>Affinity Overlap</CardTitle>
-                    <CardDescription>{report.analysis.affinity_overlap_score.toFixed(1)}% taste overlap</CardDescription>
+                    <div className="flex justify-between items-start">
+                        <div>
+                            <CardTitle>Affinity Overlap</CardTitle>
+                            <CardDescription>Number of distinct vs. shared cultural markers identified.</CardDescription>
+                        </div>
+                        <div className="text-right"><div className="text-2xl font-bold">{report.analysis.affinity_overlap_score.toFixed(1)}%</div><div className="text-xs text-muted-foreground">Taste Overlap</div></div>
+                    </div>
                 </CardHeader>
                 <CardContent className="h-[250px]">
                     <ResponsiveContainer width="100%" height="100%">
@@ -224,25 +284,7 @@ const AffinityAnalysis = ({ report }: { report: Report }) => {
                     </ResponsiveContainer>
                 </CardContent>
             </Card>
-            <Card className="col-span-1">
-                <CardHeader>
-                    <CardTitle>Top Cultural Markers</CardTitle>
-                    <CardDescription>Key tastes defining each audience.</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-2 h-[250px] overflow-y-auto pr-2">
-                    {combinedData.map((item, index) => (
-                         <div key={index} className="flex items-center gap-2 text-sm">
-                            <span className={cn(
-                                "w-2 h-2 rounded-full flex-shrink-0",
-                                item.type === 'Shared' && 'bg-primary',
-                                item.type === 'Acquirer' && 'bg-blue-500',
-                                item.type === 'Target' && 'bg-purple-500',
-                            )}></span>
-                            <span className="font-medium truncate">{item.name}</span>
-                         </div>
-                    ))}
-                </CardContent>
-            </Card>
+            <CulturalDimensionsVisual report={report} />
         </div>
     );
 };
@@ -281,7 +323,13 @@ const CorporateCultureAnalysis = ({ report }: { report: Report }) => {
                         <CardTitle>Acquirer Culture Profile</CardTitle>
                         <CardDescription>Raw intelligence gathered on {report.acquirer_brand}.</CardDescription>
                     </CardHeader>
-                    <CardContent className="space-y-4"><ScrollArea className="h-48"><p className="text-sm text-muted-foreground whitespace-pre-wrap">{analysis.acquirer_corporate_profile || "No data found."}</p></ScrollArea>
+                    <CardContent className="space-y-4">
+                        <ScrollArea className="h-48">
+                            {/* --- THE FIX IS HERE --- */}
+                            <div className="text-sm text-muted-foreground whitespace-pre-wrap prose prose-sm dark:prose-invert prose-p:my-2">
+                                <ReactMarkdown>{analysis.acquirer_corporate_profile || "No data found."}</ReactMarkdown>
+                            </div>
+                        </ScrollArea>
                         {analysis.acquirer_culture_sources && analysis.acquirer_culture_sources.length > 0 && <div><h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">Sources</h4><div className="flex flex-wrap gap-2">{analysis.acquirer_culture_sources.map(s => <SourcePill key={s.url} url={s.url} />)}</div></div>}
                     </CardContent>
                 </Card>
@@ -290,7 +338,13 @@ const CorporateCultureAnalysis = ({ report }: { report: Report }) => {
                         <CardTitle>Target Culture Profile</CardTitle>
                         <CardDescription>Raw intelligence gathered on {report.target_brand}.</CardDescription>
                     </CardHeader>
-                    <CardContent className="space-y-4"><ScrollArea className="h-48"><p className="text-sm text-muted-foreground whitespace-pre-wrap">{analysis.target_corporate_profile || "No data found."}</p></ScrollArea>
+                    <CardContent className="space-y-4">
+                        <ScrollArea className="h-48">
+                            {/* --- THE FIX IS HERE --- */}
+                             <div className="text-sm text-muted-foreground whitespace-pre-wrap prose prose-sm dark:prose-invert prose-p:my-2">
+                                <ReactMarkdown>{analysis.target_corporate_profile || "No data found."}</ReactMarkdown>
+                            </div>
+                        </ScrollArea>
                         {analysis.target_culture_sources && analysis.target_culture_sources.length > 0 && <div><h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">Sources</h4><div className="flex flex-wrap gap-2">{analysis.target_culture_sources.map(s => <SourcePill key={s.url} url={s.url} />)}</div></div>}
                     </CardContent>
                 </Card>
@@ -323,7 +377,13 @@ const FinancialAnalysis = ({ report }: { report: Report }) => {
                         <CardTitle>Acquirer Financial Profile</CardTitle>
                         <CardDescription>Raw intelligence gathered on {report.acquirer_brand}.</CardDescription>
                     </CardHeader>
-                    <CardContent className="space-y-4"><ScrollArea className="h-48"><p className="text-sm text-muted-foreground whitespace-pre-wrap"><ReactMarkdown>{analysis.acquirer_financial_profile || "No data found."}</ReactMarkdown></p></ScrollArea>
+                    <CardContent className="space-y-4">
+                        <ScrollArea className="h-48">
+                            {/* --- THE FIX IS HERE --- */}
+                             <div className="text-sm text-muted-foreground whitespace-pre-wrap prose prose-sm dark:prose-invert prose-p:my-2">
+                                <ReactMarkdown>{analysis.acquirer_financial_profile || "No data found."}</ReactMarkdown>
+                            </div>
+                        </ScrollArea>
                         {analysis.acquirer_financial_sources && analysis.acquirer_financial_sources.length > 0 && <div><h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">Sources</h4><div className="flex flex-wrap gap-2">{analysis.acquirer_financial_sources.map(s => <SourcePill key={s.url} url={s.url} />)}</div></div>}
                     </CardContent>
                 </Card>
@@ -332,7 +392,13 @@ const FinancialAnalysis = ({ report }: { report: Report }) => {
                         <CardTitle>Target Financial Profile</CardTitle>
                         <CardDescription>Raw intelligence gathered on {report.target_brand}.</CardDescription>
                     </CardHeader>
-                    <CardContent className="space-y-4"><ScrollArea className="h-48"><p className="text-sm text-muted-foreground whitespace-pre-wrap"><ReactMarkdown>{analysis.target_financial_profile || "No data found."}</ReactMarkdown></p></ScrollArea>
+                    <CardContent className="space-y-4">
+                        <ScrollArea className="h-48">
+                           {/* --- THE FIX IS HERE --- */}
+                            <div className="text-sm text-muted-foreground whitespace-pre-wrap prose prose-sm dark:prose-invert prose-p:my-2">
+                                <ReactMarkdown>{analysis.target_financial_profile || "No data found."}</ReactMarkdown>
+                            </div>
+                        </ScrollArea>
                         {analysis.target_financial_sources && analysis.target_financial_sources.length > 0 && <div><h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">Sources</h4><div className="flex flex-wrap gap-2">{analysis.target_financial_sources.map(s => <SourcePill key={s.url} url={s.url} />)}</div></div>}
                     </CardContent>
                 </Card>
@@ -415,8 +481,6 @@ export const ReportView = ({ report, children }: ReportViewProps) => {
                                 <TabsTrigger value="affinity">Audience Affinity</TabsTrigger>
                                 <TabsTrigger value="corporate">Corporate Culture</TabsTrigger>
                                 <TabsTrigger value="financial">Financial & Market</TabsTrigger>
-                                <TabsTrigger value="clashes">Culture Clashes</TabsTrigger>
-                                <TabsTrigger value="growth">Growth Opportunities</TabsTrigger>
                                 <TabsTrigger value="sources">Sources</TabsTrigger>
                             </TabsList>
                             <TabsContent value="affinity" className="mt-4">
@@ -427,29 +491,6 @@ export const ReportView = ({ report, children }: ReportViewProps) => {
                             </TabsContent>
                             <TabsContent value="financial" className="mt-4">
                                 <FinancialAnalysis report={parsedReport} />
-                            </TabsContent>
-                            <TabsContent value="clashes" className="mt-4">
-                                <Card>
-                                    <CardHeader><CardTitle className="flex items-center gap-2"><AlertTriangle className="h-5 w-5 text-red-500" />Potential Culture Clashes</CardTitle><CardDescription>Divergent audience tastes that could pose integration risks.</CardDescription></CardHeader>
-                                    <CardContent>
-                                        <Table><TableHeader><TableRow><TableHead>Clash Topic</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Severity</TableHead></TableRow></TableHeader><TableBody>{parsedReport.culture_clashes.length > 0 ? parsedReport.culture_clashes.map((c) => (<TableRow key={c.id}><TableCell className="font-semibold">{c.topic}</TableCell><TableCell className="text-muted-foreground whitespace-normal">{c.description}</TableCell><TableCell className="text-right"><SeverityBadge severity={c.severity} /></TableCell></TableRow>)) : <TableRow><TableCell colSpan={3} className="text-center text-muted-foreground h-24">No significant culture clashes identified.</TableCell></TableRow>}</TableBody></Table>
-                                    </CardContent>
-                                </Card>
-                            </TabsContent>
-                            <TabsContent value="growth" className="mt-4">
-                                <Card>
-                                    <CardHeader><CardTitle className="flex items-center gap-2"><TrendingUp className="h-5 w-5 text-green-500" />Untapped Growth Opportunities</CardTitle><CardDescription>Shared affinities that represent strategic pillars for post-acquisition integration.</CardDescription></CardHeader>
-                                    <CardContent>
-                                        <Table>
-                                            <TableHeader><TableRow><TableHead>Opportunity</TableHead><TableHead className="text-right">Impact</TableHead></TableRow></TableHeader>
-                                            <TableBody>
-                                                {parsedReport.untapped_growths.length > 0 ? parsedReport.untapped_growths.map((g) => (
-                                                    <TableRow key={g.id}><TableCell className="font-medium whitespace-normal">{g.description}</TableCell><TableCell className="text-right font-bold text-green-600 dark:text-green-400">{g.potential_impact_score}/10</TableCell></TableRow>
-                                                )) : <TableRow><TableCell colSpan={2} className="text-center text-muted-foreground h-24">No significant growth opportunities identified.</TableCell></TableRow>}
-                                            </TableBody>
-                                        </Table>
-                                    </CardContent>
-                                </Card>
                             </TabsContent>
                              <TabsContent value="sources" className="mt-4">
                                  {uniqueSources.length > 0 ? (

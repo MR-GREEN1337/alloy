@@ -8,6 +8,7 @@ import httpx
 from loguru import logger
 import uuid
 import random
+import json
 
 from fastapi_simple_rate_limiter import rate_limiter
 from src.core.security import (
@@ -55,6 +56,99 @@ GUEST_NAMES = [
     "Due Diligence Duck", "Strategic Squirrel", "Data-driven Dingo"
 ]
 
+
+# --- NEW: Seed Report Helper ---
+async def create_seed_report_for_user(session: AsyncSession, user: models.User):
+    """Creates a pre-populated demo report for a new user."""
+    logger.info(f"Creating seed report for new user: {user.email}")
+    try:
+        report = models.Report(
+            title="Demo Report: Nike vs. Patagonia",
+            acquirer_brand="Nike",
+            target_brand="Patagonia",
+            status=models.ReportStatus.COMPLETED,
+            user_id=user.id,
+        )
+
+        analysis = models.ReportAnalysis(
+            report=report,
+            cultural_compatibility_score=68.4,
+            affinity_overlap_score=45.2,
+            brand_archetype_summary=json.dumps({
+                "acquirer_archetype": "The Hero: Triumphant, determined, and focused on peak performance and victory. Nike's brand narrative consistently revolves around overcoming obstacles and achieving greatness.",
+                "target_archetype": "The Explorer: Rugged, individualistic, and driven by a desire for authenticity and connection with the natural world. Patagonia embodies adventure and environmental stewardship."
+            }),
+            strategic_summary="This potential acquisition presents a fascinating blend of mass-market dominance and niche, purpose-driven loyalty. While the cultural compatibility score of 68.4 indicates moderate alignment, the core brand archetypes (Hero vs. Explorer) are fundamentally different. The primary risk lies in diluting Patagonia's authentic, anti-consumerist brand ethos. However, the opportunity to infuse Nike's supply chain with Patagonia's sustainability innovations is a significant potential upside. A successful integration would require maintaining Patagonia as a highly autonomous subsidiary.",
+            persona_expansion_summary=json.dumps({
+                "expansion_score": 72.5,
+                "latent_synergies": ["Sustainable Materials", "Outdoor Performance Gear", "Brand Activism", "Documentary-style Storytelling"],
+                "analysis": "Nike's audience shows a strong predicted affinity for Patagonia's core values of sustainability and outdoor adventure, suggesting high potential for product cross-pollination."
+            }),
+            corporate_ethos_summary=json.dumps({
+                "acquirer_ethos": "A high-octane, competitive corporate culture focused on innovation, marketing dominance, and celebrity endorsements. The internal mantra is 'Just Do It,' reflecting a relentless drive for success.",
+                "target_ethos": "A mission-driven culture centered on environmentalism and employee well-being. Famous for its 'Let My People Go Surfing' policy, it prioritizes work-life balance and activism."
+            }),
+            financial_synthesis="Nike is a global titan with massive revenue streams and complex global logistics. Patagonia operates as a private, high-margin niche player with a famously simplified product line and a 'don't buy this jacket' marketing approach. The financial profiles are starkly different in scale but both are highly profitable.",
+            
+            # --- MODIFIED: Added detailed profile data ---
+            acquirer_corporate_profile="""
+- **Leadership**: Led by CEO John Donahoe, Nike's leadership team is composed of seasoned executives from the sports, tech, and retail industries.
+- **Values**: Core values revolve around performance, innovation, and a 'winning' mindset.
+- **Workplace**: A fast-paced, competitive environment at its Beaverton, Oregon headquarters. Known for excellent employee benefits and a campus-like atmosphere.
+            """,
+            target_corporate_profile="""
+- **Leadership**: Founded by Yvon Chouinard, the company is known for its unconventional, mission-driven leadership. In 2022, ownership was transferred to a trust to ensure profits are used to combat climate change.
+- **Values**: Environmentalism, quality, and activism are paramount. The company is a certified B Corporation.
+- **Workplace**: Fosters a culture of autonomy and passion for the outdoors, with benefits supporting environmental work and family leave.
+            """,
+            acquirer_financial_profile="""
+- **Revenue (FY2023)**: $51.2 billion
+- **Market Cap (Approx.)**: ~$150 billion
+- **Business Model**: Global retail, wholesale, and direct-to-consumer (DTC) sales of athletic footwear, apparel, and equipment.
+- **Key Strength**: Unmatched brand recognition and marketing prowess.
+            """,
+            target_financial_profile="""
+- **Revenue (est.)**: ~$1.5 billion
+- **Valuation (est.)**: ~$3 billion (at time of ownership transfer)
+- **Business Model**: Primarily DTC and wholesale of high-quality, sustainable outdoor apparel.
+- **Key Strength**: Extreme brand loyalty and pricing power due to its mission-driven approach.
+            """,
+            acquirer_sources=[{"title": "Nike, Inc. - Wikipedia", "url": "https://en.wikipedia.org/wiki/Nike,_Inc."}],
+            target_sources=[{"title": "Patagonia, Inc. - Wikipedia", "url": "https://en.wikipedia.org/wiki/Patagonia,_Inc."}],
+            acquirer_culture_sources=[{"title": "Nike's Official Careers Page", "url": "https://jobs.nike.com/"}],
+            target_culture_sources=[{"title": "Patagonia's Activism Culture", "url": "https://www.patagonia.com/activism/"}],
+            acquirer_financial_sources=[{"title": "Nike, Inc. (NKE) - Yahoo Finance", "url": "https://finance.yahoo.com/quote/NKE/"}],
+            target_financial_sources=[{"title": "Forbes: Patagonia's New Ownership", "url": "https://www.forbes.com/sites/gurufocus/2022/09/21/patagonias-new-ownership-structure-could-be-a-game-changer-for-esg-investing/"}],
+        )
+
+        # --- MODIFIED: Replaced strategic summaries with actual taste data ---
+        clashes = [
+            models.CultureClash(report=report, topic="Hip Hop Music", description="The Acquirer's audience shows a strong affinity for this, a taste not shared by the Target's.", severity=models.ClashSeverity.HIGH),
+            models.CultureClash(report=report, topic="Sneaker Collecting", description="The Acquirer's audience shows a strong affinity for this, a taste not shared by the Target's.", severity=models.ClashSeverity.HIGH),
+            models.CultureClash(report=report, topic="Pro Basketball", description="The Acquirer's audience shows a strong affinity for this, a taste not shared by the Target's.", severity=models.ClashSeverity.MEDIUM),
+            models.CultureClash(report=report, topic="Environmental Documentaries", description="The Target's audience shows a strong affinity for this, a taste not shared by the Acquirer's.", severity=models.ClashSeverity.MEDIUM),
+            models.CultureClash(report=report, topic="Rock Climbing", description="The Target's audience shows a strong affinity for this, a taste not shared by the Acquirer's.", severity=models.ClashSeverity.HIGH),
+            models.CultureClash(report=report, topic="Folk & Indie Music", description="The Target's audience shows a strong affinity for this, a taste not shared by the Acquirer's.", severity=models.ClashSeverity.MEDIUM),
+        ]
+        
+        growths = [
+            models.UntappedGrowth(report=report, description="Both audiences show a strong affinity for 'Social Media Influencers'.", potential_impact_score=9),
+            models.UntappedGrowth(report=report, description="Both audiences show a strong affinity for 'Fitness & Wellness'.", potential_impact_score=8),
+            models.UntappedGrowth(report=report, description="Both audiences show a strong affinity for 'Outdoor Apparel'.", potential_impact_score=9),
+            models.UntappedGrowth(report=report, description="Both audiences show a strong affinity for 'Action & Adventure Films'.", potential_impact_score=7),
+        ]
+
+        session.add(report)
+        session.add(analysis)
+        session.add_all(clashes)
+        session.add_all(growths)
+        
+        await session.commit()
+        logger.success(f"Seed report created successfully for user {user.email}")
+    except Exception as e:
+        await session.rollback()
+        logger.error(f"Failed to create seed report for user {user.email}: {e}")
+
 # --- Helper Function ---
 def get_backend_base_url() -> str:
     """
@@ -97,6 +191,10 @@ async def create_user_if_not_exists(session: AsyncSession, user_data: Dict[str, 
         await session.commit()
         await session.refresh(new_user)
         logger.info(f"New user created via SSO: {new_user.email}")
+        
+        # MODIFIED: Create seed report for new SSO user
+        await create_seed_report_for_user(session, new_user)
+        
         return new_user
     except Exception as e:
         await session.rollback()
@@ -122,6 +220,11 @@ async def register_user(user_create: UserCreate, session: DBSession):
     )
     session.add(new_user)
     await session.commit()
+    await session.refresh(new_user)
+    
+    # MODIFIED: Create seed report for new registered user
+    await create_seed_report_for_user(session, new_user)
+    
     return {"message": "User created successfully"}
 
 @router.post("/login", response_model=Token)
@@ -133,9 +236,9 @@ async def login_for_access_token(
     user = await get_user_by_email(session, form_data.username)
     if not user or not user.hashed_password or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED,
-            "Incorrect email or password",
-            {"WWW-Authenticate": "Bearer"},
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
         )
     
     token_data = {"sub": user.email, "full_name": user.full_name}
@@ -265,6 +368,10 @@ async def guest_login(session: DBSession):
         session.add(guest_user)
         await session.commit()
         await session.refresh(guest_user)
+        
+        # MODIFIED: Create seed report for new guest user
+        await create_seed_report_for_user(session, guest_user)
+        
     except Exception as e:
         await session.rollback()
         logger.error(f"Error creating guest user: {e}")

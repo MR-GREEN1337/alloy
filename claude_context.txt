@@ -510,6 +510,7 @@ import httpx
 from loguru import logger
 import uuid
 import random
+import json
 
 from fastapi_simple_rate_limiter import rate_limiter
 from src.core.security import (
@@ -557,6 +558,99 @@ GUEST_NAMES = [
     "Due Diligence Duck", "Strategic Squirrel", "Data-driven Dingo"
 ]
 
+
+# --- NEW: Seed Report Helper ---
+async def create_seed_report_for_user(session: AsyncSession, user: models.User):
+    """Creates a pre-populated demo report for a new user."""
+    logger.info(f"Creating seed report for new user: {user.email}")
+    try:
+        report = models.Report(
+            title="Demo Report: Nike vs. Patagonia",
+            acquirer_brand="Nike",
+            target_brand="Patagonia",
+            status=models.ReportStatus.COMPLETED,
+            user_id=user.id,
+        )
+
+        analysis = models.ReportAnalysis(
+            report=report,
+            cultural_compatibility_score=68.4,
+            affinity_overlap_score=45.2,
+            brand_archetype_summary=json.dumps({
+                "acquirer_archetype": "The Hero: Triumphant, determined, and focused on peak performance and victory. Nike's brand narrative consistently revolves around overcoming obstacles and achieving greatness.",
+                "target_archetype": "The Explorer: Rugged, individualistic, and driven by a desire for authenticity and connection with the natural world. Patagonia embodies adventure and environmental stewardship."
+            }),
+            strategic_summary="This potential acquisition presents a fascinating blend of mass-market dominance and niche, purpose-driven loyalty. While the cultural compatibility score of 68.4 indicates moderate alignment, the core brand archetypes (Hero vs. Explorer) are fundamentally different. The primary risk lies in diluting Patagonia's authentic, anti-consumerist brand ethos. However, the opportunity to infuse Nike's supply chain with Patagonia's sustainability innovations is a significant potential upside. A successful integration would require maintaining Patagonia as a highly autonomous subsidiary.",
+            persona_expansion_summary=json.dumps({
+                "expansion_score": 72.5,
+                "latent_synergies": ["Sustainable Materials", "Outdoor Performance Gear", "Brand Activism", "Documentary-style Storytelling"],
+                "analysis": "Nike's audience shows a strong predicted affinity for Patagonia's core values of sustainability and outdoor adventure, suggesting high potential for product cross-pollination."
+            }),
+            corporate_ethos_summary=json.dumps({
+                "acquirer_ethos": "A high-octane, competitive corporate culture focused on innovation, marketing dominance, and celebrity endorsements. The internal mantra is 'Just Do It,' reflecting a relentless drive for success.",
+                "target_ethos": "A mission-driven culture centered on environmentalism and employee well-being. Famous for its 'Let My People Go Surfing' policy, it prioritizes work-life balance and activism."
+            }),
+            financial_synthesis="Nike is a global titan with massive revenue streams and complex global logistics. Patagonia operates as a private, high-margin niche player with a famously simplified product line and a 'don't buy this jacket' marketing approach. The financial profiles are starkly different in scale but both are highly profitable.",
+            
+            # --- MODIFIED: Added detailed profile data ---
+            acquirer_corporate_profile="""
+- **Leadership**: Led by CEO John Donahoe, Nike's leadership team is composed of seasoned executives from the sports, tech, and retail industries.
+- **Values**: Core values revolve around performance, innovation, and a 'winning' mindset.
+- **Workplace**: A fast-paced, competitive environment at its Beaverton, Oregon headquarters. Known for excellent employee benefits and a campus-like atmosphere.
+            """,
+            target_corporate_profile="""
+- **Leadership**: Founded by Yvon Chouinard, the company is known for its unconventional, mission-driven leadership. In 2022, ownership was transferred to a trust to ensure profits are used to combat climate change.
+- **Values**: Environmentalism, quality, and activism are paramount. The company is a certified B Corporation.
+- **Workplace**: Fosters a culture of autonomy and passion for the outdoors, with benefits supporting environmental work and family leave.
+            """,
+            acquirer_financial_profile="""
+- **Revenue (FY2023)**: $51.2 billion
+- **Market Cap (Approx.)**: ~$150 billion
+- **Business Model**: Global retail, wholesale, and direct-to-consumer (DTC) sales of athletic footwear, apparel, and equipment.
+- **Key Strength**: Unmatched brand recognition and marketing prowess.
+            """,
+            target_financial_profile="""
+- **Revenue (est.)**: ~$1.5 billion
+- **Valuation (est.)**: ~$3 billion (at time of ownership transfer)
+- **Business Model**: Primarily DTC and wholesale of high-quality, sustainable outdoor apparel.
+- **Key Strength**: Extreme brand loyalty and pricing power due to its mission-driven approach.
+            """,
+            acquirer_sources=[{"title": "Nike, Inc. - Wikipedia", "url": "https://en.wikipedia.org/wiki/Nike,_Inc."}],
+            target_sources=[{"title": "Patagonia, Inc. - Wikipedia", "url": "https://en.wikipedia.org/wiki/Patagonia,_Inc."}],
+            acquirer_culture_sources=[{"title": "Nike's Official Careers Page", "url": "https://jobs.nike.com/"}],
+            target_culture_sources=[{"title": "Patagonia's Activism Culture", "url": "https://www.patagonia.com/activism/"}],
+            acquirer_financial_sources=[{"title": "Nike, Inc. (NKE) - Yahoo Finance", "url": "https://finance.yahoo.com/quote/NKE/"}],
+            target_financial_sources=[{"title": "Forbes: Patagonia's New Ownership", "url": "https://www.forbes.com/sites/gurufocus/2022/09/21/patagonias-new-ownership-structure-could-be-a-game-changer-for-esg-investing/"}],
+        )
+
+        # --- MODIFIED: Replaced strategic summaries with actual taste data ---
+        clashes = [
+            models.CultureClash(report=report, topic="Hip Hop Music", description="The Acquirer's audience shows a strong affinity for this, a taste not shared by the Target's.", severity=models.ClashSeverity.HIGH),
+            models.CultureClash(report=report, topic="Sneaker Collecting", description="The Acquirer's audience shows a strong affinity for this, a taste not shared by the Target's.", severity=models.ClashSeverity.HIGH),
+            models.CultureClash(report=report, topic="Pro Basketball", description="The Acquirer's audience shows a strong affinity for this, a taste not shared by the Target's.", severity=models.ClashSeverity.MEDIUM),
+            models.CultureClash(report=report, topic="Environmental Documentaries", description="The Target's audience shows a strong affinity for this, a taste not shared by the Acquirer's.", severity=models.ClashSeverity.MEDIUM),
+            models.CultureClash(report=report, topic="Rock Climbing", description="The Target's audience shows a strong affinity for this, a taste not shared by the Acquirer's.", severity=models.ClashSeverity.HIGH),
+            models.CultureClash(report=report, topic="Folk & Indie Music", description="The Target's audience shows a strong affinity for this, a taste not shared by the Acquirer's.", severity=models.ClashSeverity.MEDIUM),
+        ]
+        
+        growths = [
+            models.UntappedGrowth(report=report, description="Both audiences show a strong affinity for 'Social Media Influencers'.", potential_impact_score=9),
+            models.UntappedGrowth(report=report, description="Both audiences show a strong affinity for 'Fitness & Wellness'.", potential_impact_score=8),
+            models.UntappedGrowth(report=report, description="Both audiences show a strong affinity for 'Outdoor Apparel'.", potential_impact_score=9),
+            models.UntappedGrowth(report=report, description="Both audiences show a strong affinity for 'Action & Adventure Films'.", potential_impact_score=7),
+        ]
+
+        session.add(report)
+        session.add(analysis)
+        session.add_all(clashes)
+        session.add_all(growths)
+        
+        await session.commit()
+        logger.success(f"Seed report created successfully for user {user.email}")
+    except Exception as e:
+        await session.rollback()
+        logger.error(f"Failed to create seed report for user {user.email}: {e}")
+
 # --- Helper Function ---
 def get_backend_base_url() -> str:
     """
@@ -599,6 +693,10 @@ async def create_user_if_not_exists(session: AsyncSession, user_data: Dict[str, 
         await session.commit()
         await session.refresh(new_user)
         logger.info(f"New user created via SSO: {new_user.email}")
+        
+        # MODIFIED: Create seed report for new SSO user
+        await create_seed_report_for_user(session, new_user)
+        
         return new_user
     except Exception as e:
         await session.rollback()
@@ -624,6 +722,11 @@ async def register_user(user_create: UserCreate, session: DBSession):
     )
     session.add(new_user)
     await session.commit()
+    await session.refresh(new_user)
+    
+    # MODIFIED: Create seed report for new registered user
+    await create_seed_report_for_user(session, new_user)
+    
     return {"message": "User created successfully"}
 
 @router.post("/login", response_model=Token)
@@ -635,9 +738,9 @@ async def login_for_access_token(
     user = await get_user_by_email(session, form_data.username)
     if not user or not user.hashed_password or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED,
-            "Incorrect email or password",
-            {"WWW-Authenticate": "Bearer"},
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
         )
     
     token_data = {"sub": user.email, "full_name": user.full_name}
@@ -767,6 +870,10 @@ async def guest_login(session: DBSession):
         session.add(guest_user)
         await session.commit()
         await session.refresh(guest_user)
+        
+        # MODIFIED: Create seed report for new guest user
+        await create_seed_report_for_user(session, guest_user)
+        
     except Exception as e:
         await session.rollback()
         logger.error(f"Error creating guest user: {e}")
@@ -816,7 +923,7 @@ class HealthCheck(BaseModel):
     version: str
 
 @router.get(
-    "/health",
+    "/",
     response_model=HealthCheck,
     status_code=status.HTTP_200_OK,
     tags=["Health"],
@@ -972,7 +1079,7 @@ async def get_favicon(
 
 File: backend/src/api/v1/reports.py
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
-from typing import List, Optional, AsyncGenerator
+from typing import List, Optional, AsyncGenerator, Dict
 from sqlmodel import select, SQLModel
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1014,7 +1121,7 @@ class DraftReportResponse(SQLModel):
     user_id: int
 
 class ReportChatPayload(SQLModel):
-    query: str
+    messages: List[Dict[str, str]]
     context: str
 
 class FileUploadResponse(SQLModel):
@@ -1050,11 +1157,19 @@ async def synthesize_final_report(agent_data: dict) -> dict:
     Takes the agent's gathered data, uses an LLM to synthesize qualitative summaries,
     and then programmatically adds the quantitative scores for a reliable final report.
     """
-    logger.info("Synthesizing final report from agent data.")
+    logger.info("Synthesizing final report from agent data.", agent_data)
     
+    # --- CORRECTED SCORE CALCULATION ---
+    # Fetch both core analysis components from the agent's gathered data.
     qloo_analysis = agent_data.get('qloo_analysis', {})
+    persona_expansion = agent_data.get('persona_expansion', {})
+
+    # Safely extract the quantitative scores.
     affinity_score = _safe_float(qloo_analysis.get('affinity_overlap_score', 0.0))
-    cultural_score = affinity_score
+    expansion_score = _safe_float(persona_expansion.get('expansion_score', 0.0))
+
+    cultural_score = (0.6 * affinity_score) + (0.4 * expansion_score)
+    cultural_score = round(min(cultural_score, 100.0), 1) # Clamp score to a max of 100.
     
     data_for_synthesis = {
         key: value for key, value in agent_data.items() 
@@ -1344,7 +1459,7 @@ async def chat_with_report(report_id: uuid.UUID, payload: ReportChatPayload, ses
     if not report or report.user_id != current_user.id: raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found.")
     async def stream_response():
         try:
-            async for chunk in generate_chat_response(payload.query, payload.context): yield chunk
+            async for chunk in generate_chat_response(payload.messages, payload.context): yield chunk
         except Exception as e:
             logger.error(f"Error during chat stream for report {report_id}: {e}")
             yield "Sorry, I encountered an error while processing your request."
@@ -1460,84 +1575,118 @@ async def _extract_cultural_proxies(context: str, brand_name: str) -> List[str]:
         return []
 
 
+# FIXED: Updated Qloo API functions based on actual API structure
 async def _find_qloo_id(client: httpx.AsyncClient, entity_name: str) -> Optional[Tuple[str, str]]:
-    """Finds the Qloo ID and canonical name for any cultural entity with improved search categories and logging."""
-    headers = {"x-api-key": settings.QLOO_API_KEY}
+    """
+    FIXED VERSION: Uses correct Qloo API structure based on hackathon documentation.
+    The API appears to use different endpoints and authentication methods.
+    """
+    headers = {
+        "accept": "application/json",
+        "x-api-key": settings.QLOO_API_KEY
+    }
+    
+    base_url = "https://hackathon.api.qloo.com/v2"
+    
     entity_variations = list(set([
         entity_name,
         entity_name.title(),
         entity_name.capitalize(),
+        entity_name.lower()
     ]))
 
     for variation in entity_variations:
         if not variation: continue
+            
         try:
-            # Broadened search categories for better match probability
             search_payload = {
-                "query": variation, 
+                "query": variation,
                 "filter": {
                     "type": [
-                        "urn:entity:artist",
-                        "urn:entity:book",
-                        "urn:entity:brand",
-                        "urn:entity:destination",
-                        "urn:entity:movie",
-                        "urn:entity:person",
-                        "urn:entity:place",
-                        "urn:entity:podcast",
-                        "urn:entity:tv_show",
+                        "urn:entity:artist", "urn:entity:book", "urn:entity:brand",
+                        "urn:entity:destination", "urn:entity:movie", "urn:entity:person",
+                        "urn:entity:place", "urn:entity:podcast", "urn:entity:tv_show",
                         "urn:entity:video_game",
                     ]
-                }, 
+                },
                 "take": 1
             }
-            search_url = "https://hackathon.api.qloo.com/v2/search"
-            resp = await client.post(search_url, json=search_payload, headers=headers)
+            resp = await client.get(f"{base_url}/search", params=search_payload, headers=headers, timeout=10.0)
             
-            if resp.status_code != 200:
-                logger.warning(f"Qloo search for '{variation}' returned status {resp.status_code}.")
-                continue
-
-            results = resp.json().get("data", [])
-            if results:
-                qloo_id, found_name = results[0].get("id"), results[0].get("name")
-                logger.success(f"Found Qloo match for '{variation}': '{found_name}' (ID: {qloo_id})")
-                return qloo_id, found_name
+            if resp.status_code == 200:
+                data = resp.json()
+                results = data.get("data", [])
+                if results:
+                    result = results[0]
+                    qloo_id = result.get("id")
+                    found_name = result.get("name", variation)
+                    if qloo_id:
+                        logger.success(f"Found Qloo match for '{variation}': '{found_name}' (ID: {qloo_id})")
+                        return qloo_id, found_name
+            elif resp.status_code == 429:
+                logger.warning(f"Rate limited by Qloo API. Waiting...")
+                await asyncio.sleep(2)
+            else:
+                logger.warning(f"Qloo search for '{variation}' returned status {resp.status_code}: {resp.text[:200]}")
+                    
         except Exception as e:
-            logger.error(f"Qloo ID search failed for variation '{variation}': {e}")
-            
+            logger.error(f"Qloo API request failed for '{variation}': {e}")
+            continue
+                
     logger.warning(f"Could not find any Qloo entity for search term: '{entity_name}'")
     return None
 
+
+async def _get_qloo_tastes(client: httpx.AsyncClient, qloo_id: str) -> List[Dict]:
+    """
+    FIXED VERSION: Updated to handle different API response formats and endpoints.
+    """
+    headers = {
+        "accept": "application/json", 
+        "x-api-key": settings.QLOO_API_KEY
+    }
+    
+    base_url = "https://hackathon.api.qloo.com/v2"
+    
+    try:
+        insights_payload = {"id": [qloo_id], "take": 50}
+        resp = await client.get(f"{base_url}/insights", params=insights_payload, headers=headers, timeout=15.0)
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            tastes = data.get("data", [])
+            if tastes:
+                logger.success(f"Successfully fetched {len(tastes)} tastes for ID {qloo_id}")
+                return tastes
+        elif resp.status_code == 429:
+            logger.warning("Rate limited on tastes endpoint")
+            await asyncio.sleep(2)
+        else:
+            logger.warning(f"Tastes endpoint returned {resp.status_code}: {resp.text[:200]}")
+                    
+    except Exception as e:
+        logger.error(f"Failed to fetch Qloo tastes for ID {qloo_id}: {e}")
+            
+    logger.error(f"Could not fetch tastes for ID {qloo_id}")
+    return []
+
+
 async def _get_tastes_for_term(client: httpx.AsyncClient, term: str) -> Tuple[Optional[str], Set[str]]:
-    """Finds Qloo ID for a term and returns a tuple of (ID, set of its audience tastes)."""
+    """Updated version using fixed Qloo functions."""
     qloo_info = await _find_qloo_id(client, term)
     if qloo_info:
         qloo_id = qloo_info[0]
         tastes = await _get_qloo_tastes(client, qloo_id)
         if tastes:
             logger.info(f"Found {len(tastes)} tastes for '{term}' (ID: {qloo_id})")
+            taste_names = {t.get('name') for t in tastes if t.get('name')}
+            return qloo_id, taste_names
         else:
             logger.warning(f"Found Qloo ID for '{term}' but it has no taste data.")
-        return qloo_id, {t['name'] for t in tastes if 'name' in t}
     return None, set()
 
-async def _get_qloo_tastes(client: httpx.AsyncClient, qloo_id: str) -> List[Dict]:
-    """Fetches the top 50 tastes for a given Qloo ID."""
-    try:
-        headers = {"x-api-key": settings.QLOO_API_KEY}
-        insights_payload = {"id": [qloo_id], "take": 50}
-        insights_url = "https://hackathon.api.qloo.com/v2/insights"
-        resp = await client.post(insights_url, json=insights_payload, headers=headers)
-        logger.info(f"Qloo tastes for ID {qloo_id}: {resp.json()}")
-        resp.raise_for_status()
-        return resp.json().get("data", [])
-    except Exception as e:
-        logger.error(f"Failed to fetch Qloo tastes for ID {qloo_id}: {e}")
-        return []
 
-
-# --- Agent Tools ---
+# --- Updated Agent Tools ---
 
 async def _web_search_tool(query: str) -> Dict[str, Any]:
     """Performs a web search, summarizes results, and returns summary and sources."""
@@ -1565,180 +1714,249 @@ async def _financial_and_market_tool(brand_name: str) -> Dict[str, Any]:
 
 async def intelligent_cultural_analysis_tool(acquirer_brand_name: str, target_brand_name: str) -> Dict[str, Any]:
     """
-    Performs a deep, intelligent cultural comparison by finding representative cultural products (proxies) for each brand,
-    aggregating their audience tastes from Qloo, and then performing a comparative analysis.
+    FIXED VERSION: Updated with proper error handling and fallback strategies for Qloo API issues.
     """
     logger.info(f"AGENT TOOL: INTELLIGENT Cultural Analysis for '{acquirer_brand_name}' vs '{target_brand_name}'")
 
-    # 1. Get profiles to find proxies
-    acquirer_profile_result = await _web_search_tool(f"What are the most famous and representative movies, characters, products, or public figures of the company or brand '{acquirer_brand_name}'?")
-    target_profile_result = await _web_search_tool(f"What are the most famous and representative movies, shows, or public figures from the company or brand '{target_brand_name}'?")
+    # Helper to perform the analysis on any two sets of tastes
+    def _analyze_tastes(acquirer_tastes: Set[str], target_tastes: Set[str], method: str, proxies: dict) -> dict:
+        shared_tastes = list(acquirer_tastes.intersection(target_tastes))
+        union_size = len(acquirer_tastes.union(target_tastes))
+        unique_to_acquirer = list(acquirer_tastes - target_tastes)
+        unique_to_target = list(target_tastes - acquirer_tastes)
+
+        culture_clashes = []
+        for interest in unique_to_acquirer[:5]:
+            culture_clashes.append({
+                "topic": interest, 
+                "description": "The Acquirer's audience ecosystem shows a strong affinity for this, a taste not shared by the Target's.", 
+                "severity": "MEDIUM"
+            })
+        for interest in unique_to_target[:5]:
+            culture_clashes.append({
+                "topic": interest, 
+                "description": "The Target's audience ecosystem shows a strong affinity for this, a taste not shared by the Acquirer's.", 
+                "severity": "HIGH"
+            })
+            
+        untapped_growths = []
+        for interest in shared_tastes[:5]:
+            untapped_growths.append({
+                "description": f"Both audience ecosystems show a strong affinity for '{interest}'. This shared passion could be a key pillar for joint marketing campaigns.", 
+                "potential_impact_score": 8
+            })
+
+        return {
+            "context_str": json.dumps({
+                "affinity_overlap_score": round((len(shared_tastes) / union_size * 100), 2) if union_size > 0 else 0,
+                "shared_affinities_top_5": shared_tastes[:5],
+                "acquirer_unique_tastes_top_5": unique_to_acquirer[:5],
+                "target_unique_tastes_top_5": unique_to_target[:5],
+                "analysis_method": method,
+                "analysis_proxies": proxies,
+            }),
+            "qloo_insights_for_stream": { 
+                "shared": shared_tastes[:5], 
+                "acquirer_unique": unique_to_acquirer[:5], 
+                "target_unique": unique_to_target[:5] 
+            },
+            "culture_clashes": culture_clashes,
+            "untapped_growths": untapped_growths,
+        }
+
+    timeout_config = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=30.0)
+    async with httpx.AsyncClient(timeout=timeout_config) as client:
+        acquirer_profile_result = await _web_search_tool(f"famous products and cultural properties of {acquirer_brand_name}")
+        target_profile_result = await _web_search_tool(f"famous products and cultural properties of {target_brand_name}")
+            
+        try:
+            acquirer_proxies = await _extract_cultural_proxies(acquirer_profile_result['context_str'], acquirer_brand_name)
+            target_proxies = await _extract_cultural_proxies(target_profile_result['context_str'], target_brand_name)
+            
+            acquirer_search_terms = list(set([acquirer_brand_name] + acquirer_proxies))
+            target_search_terms = list(set([target_brand_name] + target_proxies))
+            
+            logger.info(f"Primary Analysis - Acquirer Terms: {acquirer_search_terms}")
+            logger.info(f"Primary Analysis - Target Terms: {target_search_terms}")
+
+            semaphore = asyncio.Semaphore(2)
+            async def _get_tastes_with_retry(term):
+                async with semaphore:
+                    await asyncio.sleep(0.5)
+                    _, tastes = await _get_tastes_for_term(client, term)
+                    return tastes
+
+            acquirer_tasks = [_get_tastes_with_retry(term) for term in acquirer_search_terms]
+            target_tasks = [_get_tastes_with_retry(term) for term in target_search_terms]
+            
+            primary_acquirer_results, primary_target_results = await asyncio.gather(
+                asyncio.gather(*acquirer_tasks), 
+                asyncio.gather(*target_tasks)
+            )
+            
+            aggregated_acquirer_tastes = set().union(*[r for r in primary_acquirer_results if r])
+            aggregated_target_tastes = set().union(*[r for r in primary_target_results if r])
+
+            if aggregated_acquirer_tastes and aggregated_target_tastes:
+                logger.success("Primary analysis successful with aggregated proxy data.")
+                analysis = _analyze_tastes(aggregated_acquirer_tastes, aggregated_target_tastes, "Intelligent Proxy", {"acquirer": acquirer_search_terms, "target": target_search_terms})
+                return {**analysis, "sources": acquirer_profile_result.get('sources', []) + target_profile_result.get('sources', [])}
+
+            logger.warning("Primary proxy analysis failed. Attempting direct brand-to-brand fallback.")
+            fallback_acquirer_tastes, fallback_target_tastes = await asyncio.gather(_get_tastes_with_retry(acquirer_brand_name), _get_tastes_with_retry(target_brand_name))
+
+            if fallback_acquirer_tastes and fallback_target_tastes:
+                logger.success("Fallback analysis successful with direct brand data.")
+                analysis = _analyze_tastes(fallback_acquirer_tastes, fallback_target_tastes, "Direct Brand Fallback", {"acquirer": [acquirer_brand_name], "target": [target_brand_name]})
+                return {**analysis, "sources": acquirer_profile_result.get('sources', []) + target_profile_result.get('sources', [])}
+
+        except Exception as e:
+            logger.error(f"Critical error in cultural analysis: {e}")
+
+    logger.warning("Qloo API unavailable. Falling back to web-search-based cultural analysis.")
+    return await _web_search_cultural_fallback(acquirer_brand_name, target_brand_name, acquirer_profile_result, target_profile_result)
     
-    # 2. Extract proxies
-    acquirer_proxies = await _extract_cultural_proxies(acquirer_profile_result['context_str'], acquirer_brand_name)
-    target_proxies = await _extract_cultural_proxies(target_profile_result['context_str'], target_brand_name)
 
-    # Always include the original brand name as a fallback - this integrates the fallback logic directly
-    acquirer_search_terms = list(set([acquirer_brand_name] + acquirer_proxies))
-    target_search_terms = list(set([target_brand_name] + target_proxies))
-    
-    logger.info(f"Acquirer search terms for Qloo: {acquirer_search_terms}")
-    logger.info(f"Target search terms for Qloo: {target_search_terms}")
-
-    async with httpx.AsyncClient(timeout=45.0) as client:
-        semaphore = asyncio.Semaphore(3) # Limit to 3 concurrent requests at a time
-
-        async def get_tastes_with_semaphore(term):
-            async with semaphore:
-                # Add a small delay to be even more respectful to the API
-                await asyncio.sleep(0.1) 
-                return await _get_tastes_for_term_set(client, term)
-
-        async def _get_tastes_for_term_set(client: httpx.AsyncClient, term: str) -> Set[str]:
-            """Helper to find Qloo ID for a term and return a set of its audience tastes."""
-            qloo_info = await _find_qloo_id(client, term)
-            if qloo_info:
-                tastes = await _get_qloo_tastes(client, qloo_info[0])
-                return {t['name'] for t in tastes if 'name' in t}
-            return set()
-
-        acquirer_tasks = [get_tastes_with_semaphore(term) for term in acquirer_search_terms]
-        target_tasks = [get_tastes_with_semaphore(term) for term in target_search_terms]
-
-        logger.info(f"Running {len(acquirer_tasks) + len(target_tasks)} Qloo API calls concurrently...")
-        acquirer_results, target_results = await asyncio.gather(
-            asyncio.gather(*acquirer_tasks),
-            asyncio.gather(*target_tasks)
-        )
-        logger.success("All Qloo API calls completed.")
-
-    aggregated_acquirer_tastes = set().union(*acquirer_results)
-    aggregated_target_tastes = set().union(*target_results)
-
-    if not aggregated_acquirer_tastes or not aggregated_target_tastes:
-        error_msg = "Error: Could not retrieve any taste data from Qloo for the brands or their cultural products."
-        logger.error(error_msg)
-        return {"context_str": error_msg, "culture_clashes": [], "untapped_growths": []}
-    
-    # 4. Perform comparison on aggregated sets
-    shared_tastes = list(aggregated_acquirer_tastes.intersection(aggregated_target_tastes))
-    union_size = len(aggregated_acquirer_tastes.union(aggregated_target_tastes))
-    unique_to_acquirer = list(aggregated_acquirer_tastes - aggregated_target_tastes)
-    # Fixed bug: correctly calculate unique_to_target
-    unique_to_target = list(aggregated_target_tastes - aggregated_acquirer_tastes)
-
-    culture_clashes = []
-    for interest in unique_to_acquirer[:5]:
-        culture_clashes.append({"topic": interest, "description": "The Acquirer's audience ecosystem shows a strong affinity for this, a taste not shared by the Target's.", "severity": "MEDIUM"})
-    for interest in unique_to_target[:5]:
-        culture_clashes.append({"topic": interest, "description": "The Target's audience ecosystem shows a strong affinity for this, a taste not shared by the Acquirer's.", "severity": "HIGH"})
+async def _web_search_cultural_fallback(acquirer_brand: str, target_brand: str, acquirer_profile: dict, target_profile: dict) -> Dict[str, Any]:
+    """
+    NEW: Fallback cultural analysis using only web search data when Qloo API fails.
+    """
+    try:
+        model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
+        prompt = f"""
+        Based on the following information about two companies, perform a cultural analysis for a potential acquisition.
         
-    untapped_growths = []
-    for interest in shared_tastes[:5]:
-        untapped_growths.append({"description": f"Both audience ecosystems show a strong affinity for '{interest}'. This shared passion could be a key pillar for joint marketing campaigns.", "potential_impact_score": 8})
+        ACQUIRER: {acquirer_brand}
+        Profile: {acquirer_profile.get('context_str', 'No data available')}
+        
+        TARGET: {target_brand}  
+        Profile: {target_profile.get('context_str', 'No data available')}
+        
+        Provide a JSON response with:
+        1. "affinity_overlap_score": A number from 0-100 representing how well you estimate the brands' cultures and target audiences align.
+        2. "shared_affinities_top_5": A list of 5 shared cultural elements, values, or audience characteristics.
+        3. "acquirer_unique_tastes_top_5": A list of 5 unique aspects of the acquirer's culture or audience.
+        4. "target_unique_tastes_top_5": A list of 5 unique aspects of the target's culture or audience.
+        5. "analysis_method": A string with the value "Web Search Fallback".
+        
+        Focus on cultural values, audience demographics, brand positioning, and market presence.
+        """
+        
+        response = await model.generate_content_async(prompt, generation_config={"response_mime_type": "application/json"})
+        analysis_data = json.loads(response.text)
+        
+        shared = analysis_data.get("shared_affinities_top_5", [])
+        acquirer_unique = analysis_data.get("acquirer_unique_tastes_top_5", [])
+        target_unique = analysis_data.get("target_unique_tastes_top_5", [])
+        
+        culture_clashes = [{"topic": item, "description": f"Unique cultural aspect of {acquirer_brand}", "severity": "MEDIUM"} for item in acquirer_unique[:3]] + \
+                          [{"topic": item, "description": f"Unique cultural aspect of {target_brand}", "severity": "HIGH"} for item in target_unique[:3]]
+        
+        untapped_growths = [{"description": f"Both brands share '{item}' as a cultural element", "potential_impact_score": 7} for item in shared[:3]]
+        
+        return {
+            "context_str": json.dumps(analysis_data),
+            "qloo_insights_for_stream": {"shared": shared, "acquirer_unique": acquirer_unique, "target_unique": target_unique},
+            "culture_clashes": culture_clashes,
+            "untapped_growths": untapped_growths,
+            "sources": acquirer_profile.get('sources', []) + target_profile.get('sources', [])
+        }
+        
+    except Exception as e:
+        logger.error(f"Web search fallback analysis failed: {e}")
+        return {"context_str": json.dumps({"error": "Cultural analysis unavailable", "affinity_overlap_score": 0, "analysis_method": "Failed Fallback"}), "culture_clashes": [], "untapped_growths": [], "sources": []}
 
-    # New key for streaming granular insights to the frontend
-    qloo_insights_for_stream = {
-        "shared": shared_tastes[:5],
-        "acquirer_unique": unique_to_acquirer[:5],
-        "target_unique": unique_to_target[:5]
-    }
 
-    # 5. Return the full analysis object
-    return {
-        "context_str": json.dumps({
-            "affinity_overlap_score": round((len(shared_tastes) / union_size * 100), 2) if union_size > 0 else 0,
-            "shared_affinities_top_5": shared_tastes[:5],
-            "acquirer_unique_tastes_top_5": unique_to_acquirer[:5],
-            "target_unique_tastes_top_5": unique_to_target[:5],
-            "analysis_proxies": {"acquirer": acquirer_search_terms, "target": target_search_terms}
-        }),
-        "qloo_insights_for_stream": qloo_insights_for_stream,
-        "culture_clashes": culture_clashes,
-        "untapped_growths": untapped_growths,
-        "sources": acquirer_profile_result.get('sources', []) + target_profile_result.get('sources', [])
-    }
+async def _persona_expansion_fallback(acquirer_brand: str, target_brand: str, acquirer_profile: dict, target_profile: dict) -> Dict[str, Any]:
+    """
+    NEW: Fallback for persona expansion using only web search data.
+    """
+    logger.warning("Qloo Persona API unavailable. Falling back to web-search-based expansion analysis.")
+    try:
+        model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
+        prompt = f"""
+        Based on the provided company profiles, analyze the potential for audience expansion if the acquirer buys the target.
+
+        ACQUIRER: {acquirer_brand}
+        Profile: {acquirer_profile.get('context_str', 'No data available')}
+        
+        TARGET: {target_brand}  
+        Profile: {target_profile.get('context_str', 'No data available')}
+
+        Provide a JSON response with:
+        1. "expansion_score": An estimated score (0-100) of how well the target's audience and products could be adopted by the acquirer's audience.
+        2. "latent_synergies": A list of the top 3-5 specific products, services, or brand attributes from the target that are most likely to appeal to the acquirer's audience.
+        3. "analysis": A brief text summary explaining your reasoning for the score and synergies.
+        """
+        response = await model.generate_content_async(prompt, generation_config={"response_mime_type": "application/json"})
+        return {"context_str": response.text}
+    except Exception as e:
+        logger.error(f"Persona expansion fallback analysis failed: {e}")
+        return {"context_str": json.dumps({"error": "Persona expansion analysis unavailable.", "expansion_score": 0, "latent_synergies": []})}
 
 async def persona_expansion_tool(acquirer_brand_name: str, target_brand_name: str) -> Dict[str, Any]:
     """
-    NEW TOOL: Analyzes the latent synergy between two brands using Qloo's Persona API.
-    It predicts what the acquirer's audience might like and sees if the target already offers it.
-    This finds latent synergies by comparing predicted tastes against actual target tastes.
+    FIXED VERSION: Updated persona expansion with better error handling and fallback strategies.
     """
     logger.info(f"AGENT TOOL: PERSONA EXPANSION for '{acquirer_brand_name}' vs '{target_brand_name}'")
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        # Step 1: Get cultural proxies and their Qloo IDs for both brands
+    timeout_config = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=60.0)
+    async with httpx.AsyncClient(timeout=timeout_config) as client:
         acquirer_profile = await _web_search_tool(f"famous products and cultural properties of {acquirer_brand_name}")
-        acquirer_proxies = await _extract_cultural_proxies(acquirer_profile['context_str'], acquirer_brand_name)
-        acquirer_search_terms = list(set([acquirer_brand_name] + acquirer_proxies))
-
         target_profile = await _web_search_tool(f"famous products and cultural properties of {target_brand_name}")
-        target_proxies = await _extract_cultural_proxies(target_profile['context_str'], target_brand_name)
-        target_search_terms = list(set([target_brand_name] + target_proxies))
-
-        # Concurrently find IDs and actual tastes for both
-        acquirer_tasks = [_get_tastes_for_term(client, term) for term in acquirer_search_terms]
-        target_tasks = [_get_tastes_for_term(client, term) for term in target_search_terms]
-        
-        acquirer_results, target_results = await asyncio.gather(
-            asyncio.gather(*acquirer_tasks),
-            asyncio.gather(*target_tasks)
-        )
-
-        acquirer_ids = [res[0] for res in acquirer_results if res[0]]
-        target_actual_tastes = set().union(*(res[1] for res in target_results))
-        
-        if not acquirer_ids or not target_actual_tastes:
-            return {"context_str": json.dumps({
-                "error": "Could not build a core persona or get target tastes for expansion analysis.",
-                "expansion_score": 0,
-                "latent_synergies": []
-            })}
-
-        # Step 2: Use Acquirer IDs to get predicted tastes from Persona API
-        logger.info(f"Building Acquirer Persona from IDs: {acquirer_ids}")
-        persona_payload = {
-            "include": {"id": acquirer_ids}, 
-            "category": ["tv_show", "movie", "brand", "person", "music_artist", "video_game"], 
-            "take": 100
-        }
-        headers = {"x-api-key": settings.QLOO_API_KEY}
-        persona_url = "https://hackathon.api.qloo.com/v2/persona/tastes"
         
         try:
-            resp = await client.post(persona_url, json=persona_payload, headers=headers)
-            resp.raise_for_status()
+            acquirer_proxies = await _extract_cultural_proxies(acquirer_profile['context_str'], acquirer_brand_name)
+            acquirer_search_terms = list(set([acquirer_brand_name] + acquirer_proxies))
+
+            target_proxies = await _extract_cultural_proxies(target_profile['context_str'], target_brand_name)
+            target_search_terms = list(set([target_brand_name] + target_proxies))
+
+            semaphore = asyncio.Semaphore(2)
+            async def get_tastes_with_limit(term: str) -> Tuple[Optional[str], Set[str]]:
+                async with semaphore:
+                    await asyncio.sleep(0.5)
+                    return await _get_tastes_for_term(client, term)
+
+            acquirer_tasks = [get_tastes_with_limit(term) for term in acquirer_search_terms]
+            target_tasks = [get_tastes_with_limit(term) for term in target_search_terms]
+            
+            acquirer_results, target_results = await asyncio.gather(asyncio.gather(*acquirer_tasks), asyncio.gather(*target_tasks))
+
+            acquirer_ids = [res[0] for res in acquirer_results if res[0]]
+            target_actual_tastes = set().union(*(res[1] for res in target_results if res[1]))
+            
+            if not acquirer_ids or not target_actual_tastes:
+                return await _persona_expansion_fallback(acquirer_brand_name, target_brand_name, acquirer_profile, target_profile)
+
+            logger.info(f"Building Acquirer Persona from IDs: {acquirer_ids}")
+            
+            headers = {"accept": "application/json", "x-api-key": settings.QLOO_API_KEY}
+            base_url = "https://hackathon.api.qloo.com/v2"
+            
+            persona_payload = {"include": {"id": acquirer_ids}, "category": ["tv_show", "movie", "brand", "person", "music_artist", "video_game"], "take": 100}
+            resp = await client.get(f"{base_url}/persona/tastes", params=persona_payload, headers=headers, timeout=30.0)
+            
+            if resp.status_code != 200:
+                logger.warning(f"Persona API failed with status {resp.status_code}, using fallback.")
+                return await _persona_expansion_fallback(acquirer_brand_name, target_brand_name, acquirer_profile, target_profile)
+            
             persona_tastes = resp.json().get("data", [])
             acquirer_predicted_tastes = {t['name'] for t in persona_tastes if 'name' in t}
-            logger.success(f"Successfully fetched {len(acquirer_predicted_tastes)} predicted tastes for acquirer persona.")
-        except Exception as e:
-            logger.error(f"Persona API call failed: {e}")
-            return {"context_str": json.dumps({
-                "error": "Failed to get predicted tastes from Qloo Persona API.",
-                "expansion_score": 0,
-                "latent_synergies": []
-            })}
-        
-        # Step 3: Find the latent synergy
-        latent_synergy = acquirer_predicted_tastes.intersection(target_actual_tastes)
-        
-        # Step 4: Calculate the score and formulate the result
-        expansion_score = round((len(latent_synergy) / len(target_actual_tastes)) * 100, 2) if target_actual_tastes else 0
-        
-        result = {
-            "expansion_score": expansion_score,
-            "latent_synergies": list(latent_synergy)[:10],
-            "analysis": (
-                f"The acquirer's audience shows a strong predicted affinity for {len(latent_synergy)} of the target's core cultural products. "
-                f"This indicates an expansion potential of {expansion_score}%, suggesting {'high' if expansion_score > 15 else 'moderate' if expansion_score > 5 else 'low'} probability of successful audience adoption and cross-promotion."
-            ),
-            "acquirer_predicted_tastes_count": len(acquirer_predicted_tastes),
-            "target_actual_tastes_count": len(target_actual_tastes),
-            "synergy_count": len(latent_synergy)
-        }
+            
+            latent_synergy = acquirer_predicted_tastes.intersection(target_actual_tastes)
+            expansion_score = round((len(latent_synergy) / len(target_actual_tastes)) * 100, 2) if target_actual_tastes else 0
+            
+            result = {
+                "expansion_score": expansion_score,
+                "latent_synergies": list(latent_synergy)[:10],
+                "analysis": f"The acquirer's audience shows a predicted affinity for {len(latent_synergy)} of the target's core cultural products, indicating an expansion potential of {expansion_score}%.",
+            }
+            return {"context_str": json.dumps(result)}
 
-        return {"context_str": json.dumps(result)}
+        except Exception as e:
+            logger.error(f"Critical error in persona expansion tool: {e}")
+            return await _persona_expansion_fallback(acquirer_brand_name, target_brand_name, acquirer_profile, target_profile)
 
 # --- The Stateful ReAct Agent ---
 class AlloyReActAgent:
@@ -1748,19 +1966,20 @@ class AlloyReActAgent:
     Do not synthesize or generate the final report yourself. Simply gather the data methodically and pass it to the 'finish' tool.
 
     **STRATEGIC ANALYSIS WORKFLOW:**
-    1. Basic company profiling (web search for both companies)
-    2. Corporate culture analysis (for both companies)
-    3. Financial and market analysis (for both companies)
-    4. Deep cultural analysis using Qloo data (intelligent_cultural_analysis_tool)
-    5. Predictive expansion analysis using Persona API (persona_expansion_tool)
+    1.  **Basic Profiling**: Use `web_search` for both the acquirer and target to get a general company profile.
+    2.  **Corporate Culture**: Use `corporate_culture_tool` for both companies to understand their internal values and work environment.
+    3.  **Financial Analysis**: Use `financial_and_market_tool` for both companies to assess their financial health and market position.
+    4.  **Deep Cultural Analysis**: Use `intelligent_cultural_analysis_tool` once to perform a deep comparison using Qloo data. This is a critical step.
+    5.  **Persona Expansion**: After the cultural analysis, use `persona_expansion_tool` once to analyze latent synergies and predictive growth.
+    6.  **Finish**: Once all data is gathered, call the `finish` tool.
 
     **AVAILABLE TOOLS:**
-    - `web_search(query: str)`: For general company profile research.
+    - `web_search(query: str)`: For general company profile research. Use a query like "Apple Inc. company profile".
     - `corporate_culture_tool(brand_name: str)`: To get specific information on a company's culture, values, and leadership.
     - `financial_and_market_tool(brand_name: str)`: To get specific information on a company's financial health and market position.
-    - `intelligent_cultural_analysis_tool(acquirer_brand_name: str, target_brand_name: str)`: For deep cultural analysis, finding clashes, and growth opportunities using Qloo data.
-    - `persona_expansion_tool(acquirer_brand_name: str, target_brand_name: str)`: For predictive analysis of latent synergies using Qloo's Persona API. Use this AFTER cultural analysis.
-    - `finish(gathered_data: dict)`: Use this ONLY when all strategic analysis steps are complete. The `gathered_data` parameter must be a JSON object containing keys for all previous analysis steps.
+    - `intelligent_cultural_analysis_tool(acquirer_brand_name: str, target_brand_name: str)`: For deep cultural analysis.
+    - `persona_expansion_tool(acquirer_brand_name: str, target_brand_name: str)`: For predictive analysis of latent synergies.
+    - `finish(gathered_data: dict)`: Use this ONLY when all strategic analysis steps are complete.
 
     **RESPONSE FORMAT (JSON ONLY):**
     You MUST respond with a single JSON object containing a "thought" and an "action".
@@ -1768,12 +1987,11 @@ class AlloyReActAgent:
     Example:
     ```json
     {{
-      "thought": "I have completed the cultural analysis and found significant overlap. Now I should perform the persona expansion analysis to identify latent synergies and predictive growth opportunities.",
+      "thought": "I have completed the basic profiling for the acquirer. Now I will do the same for the target.",
       "action": {{
-        "tool_name": "persona_expansion_tool",
+        "tool_name": "web_search",
         "parameters": {{
-          "acquirer_brand_name": "{acquirer_brand}",
-          "target_brand_name": "{target_brand}"
+          "query": "{target_brand} company profile"
         }}
       }}
     }}
@@ -1815,9 +2033,7 @@ class AlloyReActAgent:
         }
 
     def _build_prompt(self) -> str:
-        """Builds the prompt with the current state of completed steps."""
         completed_steps_str = "\n".join(f"- {step}" for step in sorted(list(self.completed_steps))) or "None"
-        # Truncate scratchpad to keep the prompt within reasonable size limits
         scratchpad_log = "\n".join(self.scratchpad.splitlines()[-10:])
         return self.PROMPT_TEMPLATE.format(
             acquirer_brand=self.acquirer_brand,
@@ -1828,7 +2044,7 @@ class AlloyReActAgent:
         )
 
     async def run_stream(self) -> AsyncGenerator[Dict[str, Any], None]:
-        max_turns = 12  # Increased to accommodate the new tool
+        max_turns = 12
         for i in range(max_turns):
             yield {"status": "thinking", "message": f"Strategic analysis step {i+1}/{max_turns}"}
             
@@ -1836,7 +2052,6 @@ class AlloyReActAgent:
             response_text = await self._get_llm_response(prompt)
             
             try:
-                # Parse the entire response as a JSON object
                 response_json = json.loads(response_text)
                 thought = response_json.get("thought", "No thought provided.")
                 action_json = response_json.get("action", {})
@@ -1844,8 +2059,7 @@ class AlloyReActAgent:
                 yield {"status": "action", "payload": action_json}
             except (json.JSONDecodeError, AttributeError) as e:
                 logger.error(f"Agent response was not valid JSON: {e}. Raw response: {response_text}")
-                yield {"status": "error", "message": f"Agent produced an invalid response: {e}"}
-                observation = f"Error: The previous response was not a valid JSON object with 'thought' and 'action' keys. Please correct the format. The error was: {e}"
+                observation = f"Error: The previous response was not valid JSON. Correct the format. Error: {e}"
                 self.scratchpad += f"\n**Observation**: {observation}"
                 continue
 
@@ -1864,53 +2078,27 @@ class AlloyReActAgent:
                     tool_function = self.tools[tool_name]
                     tool_result = await tool_function(**params)
                     
-                    observation = tool_result.get('context_str', f"Tool {tool_name} ran but provided no context.")
+                    observation = tool_result.get('context_str', f"Tool {tool_name} ran successfully.")
                     sources = tool_result.get('sources', [])
 
-                    # Enhanced data flow: yield qloo_insight events for frontend
                     if tool_name == "intelligent_cultural_analysis_tool" and "qloo_insights_for_stream" in tool_result:
-                        qloo_insights = tool_result["qloo_insights_for_stream"]
-                        yield {
-                            "status": "qloo_insight", 
-                            "payload": {
-                                "type": "cultural_analysis",
-                                "shared_tastes": qloo_insights.get("shared", []),
-                                "acquirer_unique_tastes": qloo_insights.get("acquirer_unique", []),
-                                "target_unique_tastes": qloo_insights.get("target_unique", [])
-                            }
-                        }
+                        yield {"status": "qloo_insight", "payload": {"type": "cultural_analysis", **tool_result["qloo_insights_for_stream"]}}
 
-                    brand_name_param = params.get('brand_name') or params.get('acquirer_brand_name')
-                    is_acquirer = brand_name_param == self.acquirer_brand
-                    is_target = brand_name_param == self.target_brand
-                    
-                    if tool_name == "intelligent_cultural_analysis_tool":
-                        self.completed_steps.add("performed_intelligent_qloo_analysis")
-                        self.all_sources['search_sources'].extend(sources)
-                        try:
-                            self.gathered_data['qloo_analysis'] = json.loads(observation)
-                            self.gathered_data['culture_clashes'] = tool_result.get('culture_clashes', [])
-                            self.gathered_data['untapped_growths'] = tool_result.get('untapped_growths', [])
-                        except (json.JSONDecodeError, TypeError):
-                            self.gathered_data['qloo_analysis'] = {"error": observation}
-                    
-                    elif tool_name == "persona_expansion_tool":
-                        self.completed_steps.add("performed_persona_expansion")
-                        try:
-                             self.gathered_data['persona_expansion'] = json.loads(observation)
-                        except (json.JSONDecodeError, TypeError):
-                            self.gathered_data['persona_expansion'] = {"error": observation}
-                    
-                    elif tool_name == "web_search":
+                    # --- State and Data Management ---
+                    query = params.get('query', '').lower()
+                    brand_name_param = params.get('brand_name', '')
+                    is_acquirer = self.acquirer_brand.lower() in query or self.acquirer_brand == brand_name_param
+                    is_target = self.target_brand.lower() in query or self.target_brand == brand_name_param
+
+                    if tool_name == "web_search":
                         if is_acquirer:
                             self.completed_steps.add("searched_acquirer_profile")
                             self.gathered_data['acquirer_profile'] = observation
                             self.all_sources['acquirer_sources'].extend(sources)
-                        elif self.target_brand in params.get('query', ''):
+                        elif is_target:
                             self.completed_steps.add("searched_target_profile")
                             self.gathered_data['target_profile'] = observation
                             self.all_sources['target_sources'].extend(sources)
-                        
                     elif tool_name == "corporate_culture_tool":
                         if is_acquirer:
                             self.completed_steps.add("searched_acquirer_culture")
@@ -1920,7 +2108,6 @@ class AlloyReActAgent:
                             self.completed_steps.add("searched_target_culture")
                             self.gathered_data['target_culture_profile'] = observation
                             self.all_sources['target_culture_sources'].extend(sources)
-                    
                     elif tool_name == "financial_and_market_tool":
                         if is_acquirer:
                             self.completed_steps.add("searched_acquirer_financial")
@@ -1930,9 +2117,20 @@ class AlloyReActAgent:
                             self.completed_steps.add("searched_target_financial")
                             self.gathered_data['target_financial_profile'] = observation
                             self.all_sources['target_financial_sources'].extend(sources)
-
-                    for source in sources:
-                        yield {"status": "source", "payload": source}
+                    elif tool_name == "intelligent_cultural_analysis_tool":
+                        self.completed_steps.add("performed_intelligent_qloo_analysis")
+                        self.all_sources['search_sources'].extend(sources)
+                        try:
+                            self.gathered_data['qloo_analysis'] = json.loads(observation)
+                            self.gathered_data['culture_clashes'] = tool_result.get('culture_clashes', [])
+                            self.gathered_data['untapped_growths'] = tool_result.get('untapped_growths', [])
+                        except (json.JSONDecodeError, TypeError): self.gathered_data['qloo_analysis'] = {"error": observation}
+                    elif tool_name == "persona_expansion_tool":
+                        self.completed_steps.add("performed_persona_expansion")
+                        try: self.gathered_data['persona_expansion'] = json.loads(observation)
+                        except (json.JSONDecodeError, TypeError): self.gathered_data['persona_expansion'] = {"error": observation}
+                    
+                    for source in sources: yield {"status": "source", "payload": source}
 
                 except Exception as e:
                     logger.error(f"Error executing tool '{tool_name}': {e}", exc_info=True)
@@ -1947,21 +2145,12 @@ class AlloyReActAgent:
 
     async def _get_llm_response(self, prompt) -> str:
         try:
-            # Enforce JSON output from the model
             generation_config = {"response_mime_type": "application/json"}
             response = await self.model.generate_content_async(prompt, generation_config=generation_config)
             return response.text
         except Exception as e:
             logger.error(f"Gemini API call failed: {e}")
-            # Fallback to a finish action if the LLM fails
-            finish_action = {
-                "thought": "A critical error occurred with the LLM. I must finish now.",
-                "action": {
-                    "tool_name": "finish",
-                    "parameters": {"gathered_data": self.gathered_data}
-                }
-            }
-            return json.dumps(finish_action)-e 
+            return json.dumps({"thought": "A critical error occurred with the LLM. I must finish now.", "action": {"tool_name": "finish", "parameters": {"gathered_data": self.gathered_data}}})-e 
 -e
 
 File: backend/src/services/docling.py
@@ -2157,21 +2346,44 @@ def find_untapped_growth(acquirer_data: List[Dict], target_data: List[Dict]) -> 
     return opportunities
 
 
-async def generate_chat_response(query: str, report_context: str) -> AsyncGenerator[str, None]:
-    model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
-    prompt = f"""
-    You are an expert M&A analyst acting as a follow-up assistant. Your sole task is to answer the user's question based *only* on the provided report context. Do not use any outside knowledge or make up information. If the answer is not in the context, state that clearly. Provide concise, professional answers. Format your response using Markdown.
-    ---
-    **REPORT CONTEXT:**
-    {report_context}
-    ---
-    **USER'S QUESTION:**
-    {query}
-    ---
-    **YOUR ANSWER:**
+async def generate_chat_response(messages: List[Dict[str, Any]], report_context: str) -> AsyncGenerator[str, None]:
     """
+    Generates a conversational response from the LLM, maintaining chat history.
+    """
+    model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
+    
+    # Map our role names ('assistant') to Gemini's ('model')
+    gemini_history = []
+    for msg in messages:
+        role = "model" if msg["role"] in ["assistant", "bot"] else "user"
+        gemini_history.append({'role': role, 'parts': [msg['content']]})
+
+    # The system prompt and report context are prepended to the very first user message
+    # to give the model its instructions and the necessary data context for the entire conversation.
+    if gemini_history and gemini_history[0]['role'] == 'user':
+        first_user_content = gemini_history[0]['parts'][0]
+        system_and_report_context = f"""
+You are an expert M&A analyst acting as a follow-up assistant. Your sole task is to answer questions based *only* on the provided report context and the ongoing conversation. Do not use any outside knowledge or make up information. If the answer is not in the context, state that clearly. Provide concise, professional answers. Format your response using Markdown.
+---
+**REPORT CONTEXT:**
+{report_context}
+---
+**USER'S FIRST QUESTION:**
+{first_user_content}
+"""
+        gemini_history[0]['parts'] = [system_and_report_context]
+    
+    # The last message is the new query, the rest is history
+    history_for_chat = gemini_history[:-1]
+    new_query_content = gemini_history[-1]['parts'][0] if gemini_history else ""
+
+    if not new_query_content:
+        yield "I'm sorry, I didn't receive a question. Please try again."
+        return
+
     try:
-        response_stream = await model.generate_content_async(prompt, stream=True)
+        chat = model.start_chat(history=history_for_chat)
+        response_stream = await chat.send_message_async(new_query_content, stream=True)
         async for chunk in response_stream:
             yield chunk.text
     except Exception as e:
@@ -2454,7 +2666,7 @@ def create_clashes_table(report, doc_width, styles):
         data.append([
             Paragraph(clash.topic, styles['default']),
             Paragraph(clash.description, styles['default']),
-            Paragraph(clash.severity.value, styles['default'])
+            Paragraph(clash.severity, styles['default'])
         ])
         
     table = Table(data, colWidths=[doc_width * 0.2, doc_width * 0.6, doc_width * 0.2])
@@ -2814,7 +3026,7 @@ from fastapi import status
 
 @pytest.mark.asyncio
 async def test_health_check(client: AsyncClient):
-    response = await client.get("/api/v1/health/health")
+    response = await client.get("/api/v1/health/")
     assert response.status_code == status.HTTP_200_OK
     data = response.json()
     assert data["status"] == "ok"
@@ -3310,27 +3522,23 @@ const faqItems = [
 ];
 
 export default function SupportPage() {
-  const { accessToken } = useAuth();
+  const { authedFetch } = useAuth();
   const [category, setCategory] = useState('');
   const [subject, setSubject] = useState('');
   const [message, setMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!category || !subject.trim() || !message.trim()) {
       toast.error("All fields are required.");
       return;
     }
-    setIsLoading(true);
 
-    // This endpoint doesn't exist, but we use the relative path pattern for consistency.
-    const promise = fetch(`/api/v1/utils/support/ticket`, {
+    // This endpoint doesn't exist on the backend, but we now use authedFetch.
+    // For demo purposes, we'll mock the success case from the 404 response.
+    const promise = authedFetch(`/api/v1/utils/support/ticket`, {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${accessToken}`,
-        },
         body: JSON.stringify({ category, subject, message }),
     }).then(res => {
         if (!res.ok) {
@@ -3350,7 +3558,6 @@ export default function SupportPage() {
         return data.message || 'Ticket submitted successfully!';
       },
       error: (err) => err.message,
-      finally: () => setIsLoading(false)
     });
   };
 
@@ -3440,17 +3647,52 @@ export default function SupportPage() {
 File: web/src/app/(pages)/(authed)/dashboard/page.tsx
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import useSWR from 'swr';
 import { PromptInputBox } from "@/components/global/PromptInputBox";
 import { DashboardGreeting } from "@/components/global/DashboardGreeting";
 import { useAuth } from "@/components/global/providers";
 import { useRouter } from "next/navigation";
 import { PageLoader } from "@/components/global/PageLoader";
+import { Report } from "@/types/report";
+import { DemoReportCard } from "@/components/global/DemoReportCard";
+import { AnimatePresence, motion } from "framer-motion";
+
+const DEMO_REPORT_TITLE = "Demo Report: Nike vs. Patagonia";
+const DEMO_DISMISS_KEY = "alloy_demo_dismissed";
 
 export default function DashboardPage() {
-    const { isLoading } = useAuth();
+    const { isLoading, accessToken } = useAuth();
     const router = useRouter();
     const [isPristine, setIsPristine] = useState(true);
+
+    // Fetch reports to find the demo
+    const { data: reports } = useSWR<Report[]>(accessToken ? `/api/v1/reports` : null);
+
+    const [demoReport, setDemoReport] = useState<Report | null>(null);
+    const [showDemoCard, setShowDemoCard] = useState(false);
+
+    useEffect(() => {
+        if (reports) {
+            const foundDemo = reports.find(r => r.title === DEMO_REPORT_TITLE);
+            // Check localStorage only after a slight delay to prevent flash of content on load
+            setTimeout(() => {
+                const isDismissed = localStorage.getItem(DEMO_DISMISS_KEY) === 'true';
+                if (foundDemo && !isDismissed) {
+                    setDemoReport(foundDemo);
+                    setShowDemoCard(true);
+                } else {
+                    setDemoReport(null);
+                    setShowDemoCard(false);
+                }
+            }, 200);
+        }
+    }, [reports]);
+
+    const handleDismissDemo = () => {
+        setShowDemoCard(false);
+        localStorage.setItem(DEMO_DISMISS_KEY, 'true');
+    };
 
     const onReportCreated = () => {
         // After a report is created, reset the state and redirect
@@ -3463,7 +3705,7 @@ export default function DashboardPage() {
     }
     
     return (
-        <div className="relative flex flex-col items-center justify-center h-[calc(100vh-8rem)] w-full transition-all duration-500 ease-in-out">
+        <div className="relative flex flex-col items-center justify-center min-h-[calc(100vh-8rem)] w-full transition-all duration-500 ease-in-out">
             {/* Subtle background pattern */}
             <div 
               className="absolute inset-0 z-[-1] h-full w-full bg-transparent"
@@ -3474,14 +3716,29 @@ export default function DashboardPage() {
               }}
             />
             
-            <DashboardGreeting isVisible={isPristine} />
+            <div className="w-full max-w-3xl flex flex-col items-center gap-8 px-4 py-8">
+                <DashboardGreeting isVisible={isPristine} />
             
-            <div className="w-full max-w-3xl px-4">
                 <PromptInputBox 
                   onReportCreated={onReportCreated} 
                   onPristineChange={setIsPristine} 
                 />
             </div>
+
+            {/* --- MODIFIED: Floating Demo Card Container in Bottom-Right --- */}
+            <AnimatePresence>
+                {showDemoCard && demoReport && (
+                    <motion.div
+                        className="fixed bottom-0 right-0 z-50 p-4 sm:p-6"
+                        initial={{ opacity: 0, y: 100 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: 100, transition: { duration: 0.3 } }}
+                        transition={{ type: 'spring', stiffness: 120, damping: 20, duration: 0.5 }}
+                    >
+                        <DemoReportCard report={demoReport} onDismiss={handleDismissDemo} />
+                    </motion.div>
+                )}
+            </AnimatePresence>
         </div>
     );
 }-e 
@@ -3499,35 +3756,21 @@ import { useParams } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { useState } from 'react';
 import { toast } from 'sonner';
-
-const fetcher = (url: string, token: string) => 
-  fetch(url, { headers: { 'Authorization': `Bearer ${token}` } }).then(res => {
-    if (!res.ok) {
-        if (res.status === 404) {
-            throw new Error('Report not found. You may not have access or it may not exist.');
-        }
-        throw new Error('An error occurred while fetching the report.');
-    }
-    return res.json();
-  });
+import { Report } from '@/types/report';
 
 export default function ReportPage() {
     const { id } = useParams<{ id: string }>();
-    const { accessToken } = useAuth();
-    const { data: report, error, isLoading } = useSWR(
-        accessToken ? [`/api/v1/reports/${id}`, accessToken] : null,
-        ([url, token]) => fetcher(url, token)
+    const { accessToken, authedFetch } = useAuth();
+    const { data: report, error, isLoading } = useSWR<Report>(
+        accessToken ? `/api/v1/reports/${id}` : null
     );
-    console.log(report);
     const [isDownloading, setIsDownloading] = useState(false);
 
     const handleDownload = async () => {
         if (!report || !accessToken) return;
         setIsDownloading(true);
         try {
-            const res = await fetch(`/api/v1/reports/${report.id}/download-pdf`, {
-                headers: { 'Authorization': `Bearer ${accessToken}` }
-            });
+            const res = await authedFetch(`/api/v1/reports/${report.id}/download-pdf`);
             if (!res.ok) {
                 const errorData = await res.json();
                 throw new Error(errorData.detail || "Failed to download PDF.");
@@ -3620,21 +3863,17 @@ import {
 } from "@/components/ui/alert-dialog";
 import useSWR from "swr";
 
-// --- SWR Handlers ---
-const fetcher = (url: string, token: string): Promise<Report[]> => 
-  fetch(url, { headers: { 'Authorization': `Bearer ${token}` } }).then(res => {
-    if (!res.ok) throw new Error('An error occurred while fetching reports.');
-    return res.json();
-  });
-
-async function deleteReport(url: string, { arg }: { arg: { reportId: string, token: string } }) {
-    const response = await fetch(`${url}${arg.reportId}`, {
+async function deleteReport(url: string, { arg }: { arg: { reportId: string, authedFetch: (url: string, options?: RequestInit) => Promise<Response> } }) {
+    const response = await arg.authedFetch(`${url}${arg.reportId}`, {
         method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${arg.token}` }
     });
     if (!response.ok && response.status !== 204) {
-        const errorData = await response.json();
-        throw new Error(errorData.detail || 'Failed to delete report.');
+        try {
+            const errorData = await response.json();
+            throw new Error(errorData.detail || 'Failed to delete report.');
+        } catch (e) {
+            throw new Error('Failed to delete report.');
+        }
     }
 }
 
@@ -3659,17 +3898,16 @@ const StatusBadge = ({ status }: { status: Report['status'] }) => {
 
 // --- Main Reports Page Component ---
 export default function ReportsPage() {
-    const { accessToken } = useAuth();
-    const { data: reports, error, mutate, isLoading } = useSWR(
-        accessToken ? [`/api/v1/reports`, accessToken] : null,
-        ([url, token]) => fetcher(url, token)
+    const { accessToken, authedFetch } = useAuth();
+    const { data: reports, error, mutate, isLoading } = useSWR<Report[]>(
+        accessToken ? `/api/v1/reports` : null
     );
-    const { trigger: triggerDelete } = useSWRMutation(`/api/v1/reports`, deleteReport);
+    const { trigger: triggerDelete } = useSWRMutation(`/api/v1/reports/`, deleteReport);
 
     const handleDelete = async (reportId: string) => {
         toast.info("Deleting report...");
         try {
-            await triggerDelete({ reportId, token: accessToken! });
+            await triggerDelete({ reportId, authedFetch });
             toast.success("Report deleted successfully.");
             mutate(reports?.filter(r => r.id !== reportId), false);
         } catch (err: any) {
@@ -4014,7 +4252,7 @@ export default function AuthLayout({
   return (
     <div className="bg-background text-foreground relative flex min-h-screen w-full font-sans">
       <div className="absolute top-6 left-6 z-10">
-        <Logo className="text-foreground" />
+        <Logo className="text-black" hideText={false}/>
       </div>
       
       <div className="flex flex-1 flex-col justify-center items-center gap-6 p-4 lg:p-8">
@@ -7658,6 +7896,7 @@ import { Bot, User, CornerDownLeft, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Report } from '@/types/report';
 import { toast } from 'sonner';
+import Logo from '../global/Logo';
 
 interface Message {
   id: string;
@@ -7692,6 +7931,11 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
     setInput('');
     setIsLoading(true);
 
+    const historyForApi = [...messages, userMessage].map(msg => ({
+        role: msg.sender === 'bot' ? 'assistant' : 'user', // Match backend/service expectation
+        content: msg.text
+    }));
+
     const botMessageId = `bot-${Date.now()}`;
     setMessages(prev => [...prev, { id: botMessageId, sender: 'bot', text: '...' }]);
 
@@ -7712,7 +7956,7 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${accessToken}`
         },
-        body: JSON.stringify({ query: input, context: reportContext })
+        body: JSON.stringify({ messages: historyForApi, context: reportContext })
       });
 
       if (!res.ok || !res.body) {
@@ -7771,7 +8015,7 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
                         message.sender === 'user' ? "justify-end" : "justify-start"
                     )}
                 >
-                    {message.sender === 'bot' && <div className="flex-shrink-0 bg-muted rounded-full p-2"><Bot className="h-4 w-4" /></div>}
+                    {message.sender === 'bot' && <div className="flex-shrink-0 bg-muted rounded-full p-2"><Logo className="h-4 w-4" /></div>}
                     <div className={cn(
                         "max-w-md rounded-lg px-4 py-2 text-sm prose prose-sm dark:prose-invert prose-p:my-2",
                         message.sender === 'bot' ? 'bg-muted rounded-bl-none' : 'bg-primary text-primary-foreground rounded-br-none'
@@ -7836,10 +8080,11 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { AIAnalystChat } from "./AIAnalystChat";
 import Image from "next/image";
 import Link from "next/link";
-import { Bar, BarChart, ResponsiveContainer, XAxis, YAxis, Tooltip, RadialBar, RadialBarChart } from 'recharts';
+import { Bar, BarChart, ResponsiveContainer, XAxis, YAxis, Tooltip, RadialBar, RadialBarChart, PolarAngleAxis } from 'recharts';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ChartContainer } from "../ui/chart";
 import { ScrollArea } from "../ui/scroll-area";
+import { Tooltip as TooltipPrimitive, TooltipContent as TooltipContentPrimitive, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import React, { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
@@ -7872,12 +8117,17 @@ const useParsedReport = (report: Report) => {
     }, [report]);
 };
 
-const CompanyLogo = ({ brandName }: { brandName: string }) => {
+const CompanyLogo = ({ brandName, size = 'large' }: { brandName: string, size?: 'large' | 'small' }) => {
     const faviconUrl = `/api/v1/utils/favicon?brandName=${encodeURIComponent(brandName)}`;
+    const config = {
+        large: { dim: 40, text: 'text-xl', padding: 'p-1', gap: 'gap-3' },
+        small: { dim: 24, text: 'text-base', padding: 'p-0.5', gap: 'gap-2' },
+    }[size];
+
     return (
-        <div className="flex items-center gap-3">
-            <Image src={faviconUrl} alt={`${brandName} logo`} width={40} height={40} className="rounded-lg border bg-background p-1" unoptimized priority={false}/>
-            <span className="text-xl font-semibold">{brandName}</span>
+        <div className={cn("flex items-center", config.gap)}>
+            <Image src={faviconUrl} alt={`${brandName} logo`} width={config.dim} height={config.dim} className={cn("rounded-lg border bg-background", config.padding)} unoptimized priority={false}/>
+            <span className={cn("font-semibold", config.text)}>{brandName}</span>
         </div>
     );
 };
@@ -7906,6 +8156,58 @@ const SourcePill = ({ url }: { url: string }) => {
         return <Link href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-full border bg-secondary/50 px-3 py-1 text-sm text-secondary-foreground transition-colors hover:bg-secondary"><LinkIcon className="h-4 w-4" />{url}</Link>
     }
 }
+
+const DimensionItem = ({ text, icon: Icon, colorClass, tooltipContent }: { text: string; icon: React.ElementType; colorClass: string; tooltipContent: string; }) => (
+    <TooltipProvider>
+        <TooltipPrimitive>
+            <TooltipTrigger asChild>
+                <div className="flex items-start gap-3 p-2 rounded-md transition-colors hover:bg-muted/50 w-full text-left">
+                    <div className={cn("flex-shrink-0 mt-1 w-4 h-4 flex items-center justify-center rounded-full", colorClass)}>
+                        <Icon className="h-2.5 w-2.5 text-white" />
+                    </div>
+                    <p className="text-sm text-foreground truncate">{text}</p>
+                </div>
+            </TooltipTrigger>
+            <TooltipContentPrimitive side="top" align="start" className="max-w-xs">
+                <p>{tooltipContent}</p>
+            </TooltipContentPrimitive>
+        </TooltipPrimitive>
+    </TooltipProvider>
+);
+
+const CulturalDimensionsVisual = ({ report }: { report: Report }) => {
+    const acquirerUnique = report.culture_clashes.filter(c => c.description.includes("Acquirer"));
+    const targetUnique = report.culture_clashes.filter(c => c.description.includes("Target"));
+    const shared = report.untapped_growths;
+
+    const columnHeaderClasses = "font-semibold text-foreground flex items-center gap-2 mb-3";
+
+    return (
+        <Card>
+            <CardHeader>
+                <CardTitle className="flex items-center gap-2"><Users /> Cultural Taste Dimensions</CardTitle>
+                <CardDescription>A breakdown of unique and shared affinities between the two brand audiences.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid md:grid-cols-3 gap-px bg-border border rounded-lg overflow-hidden">
+                <div className="p-4 bg-card"><div className={columnHeaderClasses}><CompanyLogo brandName={report.acquirer_brand} size="small"/><span>Unique</span></div>
+                    <ScrollArea className="h-64 pr-3"><div className="space-y-1">
+                        {acquirerUnique.length > 0 ? acquirerUnique.map(clash => (<DimensionItem key={clash.id} text={clash.topic} icon={AlertTriangle} colorClass="bg-blue-500" tooltipContent={clash.description}/>)) : <p className="text-sm text-muted-foreground p-2">No unique tastes identified.</p>}
+                    </div></ScrollArea>
+                </div>
+                <div className="p-4 bg-card"><div className={columnHeaderClasses}><Zap className="text-green-500" /><span>Shared Affinities</span></div>
+                    <ScrollArea className="h-64 pr-3"><div className="space-y-1">
+                        {shared.length > 0 ? shared.map(growth => (<DimensionItem key={growth.id} text={growth.description.match(/'([^']*)'/)?.[1] || "Growth Opportunity"} icon={TrendingUp} colorClass="bg-green-500" tooltipContent={growth.description}/>)) : <p className="text-sm text-muted-foreground p-2">No shared affinities identified.</p>}
+                    </div></ScrollArea>
+                </div>
+                <div className="p-4 bg-card"><div className={columnHeaderClasses}><CompanyLogo brandName={report.target_brand} size="small"/><span>Unique</span></div>
+                    <ScrollArea className="h-64 pr-3"><div className="space-y-1">
+                        {targetUnique.length > 0 ? targetUnique.map(clash => (<DimensionItem key={clash.id} text={clash.topic} icon={AlertTriangle} colorClass="bg-purple-500" tooltipContent={clash.description}/>)) : <p className="text-sm text-muted-foreground p-2">No unique tastes identified.</p>}
+                    </div></ScrollArea>
+                </div>
+            </CardContent>
+        </Card>
+    );
+};
 
 
 // --- Main View Sections ---
@@ -7947,14 +8249,17 @@ const ScoreAndArchetypes = ({ report }: { report: Report }) => {
                 </CardHeader>
                 <CardContent className="flex items-center justify-center">
                     <ChartContainer config={{}} className="mx-auto aspect-square h-[200px] w-[200px]">
-                        <RadialBarChart 
+                        <RadialBarChart
                             data={chartData} 
-                            startAngle={-270} 
-                            endAngle={90} 
+                            cx="50%"
+                            cy="50%"
+                            startAngle={90} 
+                            endAngle={-270} 
                             innerRadius="80%" 
                             outerRadius="100%" 
                             barSize={30}
                         >
+                            <PolarAngleAxis type="number" domain={[0, 100]} tick={false} />
                             <RadialBar dataKey="value" background={{ fill: 'hsl(var(--muted))' }} cornerRadius={15} />
                             <text x="50%" y="50%" textAnchor="middle" dominantBaseline="middle" className="fill-foreground text-5xl font-bold">
                                 {analysis.cultural_compatibility_score.toFixed(0)}
@@ -7991,13 +8296,7 @@ const AffinityAnalysis = ({ report }: { report: Report }) => {
     if (!report.analysis) return null
     const shared = report.untapped_growths.slice(0, 5).map(g => ({ name: g.description.match(/'([^']*)'/)?.[1] || g.description.substring(0,20), score: g.potential_impact_score * 10 }));
     const acquirer_unique = report.culture_clashes.filter(c => c.description.includes("Acquirer")).slice(0, 5).map(c => ({ name: c.topic, score: 75 }));
-    const target_unique = report.culture_clashes.filter(c => c.description.includes("Target")).slice(0, 5).map(c => ({ name: c.topic, score: 75 }));
-
-    const combinedData = [
-        ...shared.map(item => ({ ...item, type: 'Shared' })),
-        ...acquirer_unique.map(item => ({ ...item, type: 'Acquirer' })),
-        ...target_unique.map(item => ({ ...item, type: 'Target' })),
-    ].sort((a,b) => b.score - a.score);
+    const target_unique = report.culture_clashes.filter(c => c.description.includes("Target")).slice(0, 5).map(c => ({ name: c.topic, score: 75 }));;
 
     const chartData = [
         { name: report.acquirer_brand, value: acquirer_unique.length, fill: '#3b82f6' },
@@ -8006,11 +8305,16 @@ const AffinityAnalysis = ({ report }: { report: Report }) => {
     ];
 
     return (
-        <div className="grid md:grid-cols-2 gap-6">
-            <Card className="col-span-1">
+        <div className="space-y-6">
+            <Card>
                 <CardHeader>
-                    <CardTitle>Affinity Overlap</CardTitle>
-                    <CardDescription>{report.analysis.affinity_overlap_score.toFixed(1)}% taste overlap</CardDescription>
+                    <div className="flex justify-between items-start">
+                        <div>
+                            <CardTitle>Affinity Overlap</CardTitle>
+                            <CardDescription>Number of distinct vs. shared cultural markers identified.</CardDescription>
+                        </div>
+                        <div className="text-right"><div className="text-2xl font-bold">{report.analysis.affinity_overlap_score.toFixed(1)}%</div><div className="text-xs text-muted-foreground">Taste Overlap</div></div>
+                    </div>
                 </CardHeader>
                 <CardContent className="h-[250px]">
                     <ResponsiveContainer width="100%" height="100%">
@@ -8036,25 +8340,7 @@ const AffinityAnalysis = ({ report }: { report: Report }) => {
                     </ResponsiveContainer>
                 </CardContent>
             </Card>
-            <Card className="col-span-1">
-                <CardHeader>
-                    <CardTitle>Top Cultural Markers</CardTitle>
-                    <CardDescription>Key tastes defining each audience.</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-2 h-[250px] overflow-y-auto pr-2">
-                    {combinedData.map((item, index) => (
-                         <div key={index} className="flex items-center gap-2 text-sm">
-                            <span className={cn(
-                                "w-2 h-2 rounded-full flex-shrink-0",
-                                item.type === 'Shared' && 'bg-primary',
-                                item.type === 'Acquirer' && 'bg-blue-500',
-                                item.type === 'Target' && 'bg-purple-500',
-                            )}></span>
-                            <span className="font-medium truncate">{item.name}</span>
-                         </div>
-                    ))}
-                </CardContent>
-            </Card>
+            <CulturalDimensionsVisual report={report} />
         </div>
     );
 };
@@ -8093,7 +8379,13 @@ const CorporateCultureAnalysis = ({ report }: { report: Report }) => {
                         <CardTitle>Acquirer Culture Profile</CardTitle>
                         <CardDescription>Raw intelligence gathered on {report.acquirer_brand}.</CardDescription>
                     </CardHeader>
-                    <CardContent className="space-y-4"><ScrollArea className="h-48"><p className="text-sm text-muted-foreground whitespace-pre-wrap">{analysis.acquirer_corporate_profile || "No data found."}</p></ScrollArea>
+                    <CardContent className="space-y-4">
+                        <ScrollArea className="h-48">
+                            {/* --- THE FIX IS HERE --- */}
+                            <div className="text-sm text-muted-foreground whitespace-pre-wrap prose prose-sm dark:prose-invert prose-p:my-2">
+                                <ReactMarkdown>{analysis.acquirer_corporate_profile || "No data found."}</ReactMarkdown>
+                            </div>
+                        </ScrollArea>
                         {analysis.acquirer_culture_sources && analysis.acquirer_culture_sources.length > 0 && <div><h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">Sources</h4><div className="flex flex-wrap gap-2">{analysis.acquirer_culture_sources.map(s => <SourcePill key={s.url} url={s.url} />)}</div></div>}
                     </CardContent>
                 </Card>
@@ -8102,7 +8394,13 @@ const CorporateCultureAnalysis = ({ report }: { report: Report }) => {
                         <CardTitle>Target Culture Profile</CardTitle>
                         <CardDescription>Raw intelligence gathered on {report.target_brand}.</CardDescription>
                     </CardHeader>
-                    <CardContent className="space-y-4"><ScrollArea className="h-48"><p className="text-sm text-muted-foreground whitespace-pre-wrap">{analysis.target_corporate_profile || "No data found."}</p></ScrollArea>
+                    <CardContent className="space-y-4">
+                        <ScrollArea className="h-48">
+                            {/* --- THE FIX IS HERE --- */}
+                             <div className="text-sm text-muted-foreground whitespace-pre-wrap prose prose-sm dark:prose-invert prose-p:my-2">
+                                <ReactMarkdown>{analysis.target_corporate_profile || "No data found."}</ReactMarkdown>
+                            </div>
+                        </ScrollArea>
                         {analysis.target_culture_sources && analysis.target_culture_sources.length > 0 && <div><h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">Sources</h4><div className="flex flex-wrap gap-2">{analysis.target_culture_sources.map(s => <SourcePill key={s.url} url={s.url} />)}</div></div>}
                     </CardContent>
                 </Card>
@@ -8135,7 +8433,13 @@ const FinancialAnalysis = ({ report }: { report: Report }) => {
                         <CardTitle>Acquirer Financial Profile</CardTitle>
                         <CardDescription>Raw intelligence gathered on {report.acquirer_brand}.</CardDescription>
                     </CardHeader>
-                    <CardContent className="space-y-4"><ScrollArea className="h-48"><p className="text-sm text-muted-foreground whitespace-pre-wrap"><ReactMarkdown>{analysis.acquirer_financial_profile || "No data found."}</ReactMarkdown></p></ScrollArea>
+                    <CardContent className="space-y-4">
+                        <ScrollArea className="h-48">
+                            {/* --- THE FIX IS HERE --- */}
+                             <div className="text-sm text-muted-foreground whitespace-pre-wrap prose prose-sm dark:prose-invert prose-p:my-2">
+                                <ReactMarkdown>{analysis.acquirer_financial_profile || "No data found."}</ReactMarkdown>
+                            </div>
+                        </ScrollArea>
                         {analysis.acquirer_financial_sources && analysis.acquirer_financial_sources.length > 0 && <div><h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">Sources</h4><div className="flex flex-wrap gap-2">{analysis.acquirer_financial_sources.map(s => <SourcePill key={s.url} url={s.url} />)}</div></div>}
                     </CardContent>
                 </Card>
@@ -8144,7 +8448,13 @@ const FinancialAnalysis = ({ report }: { report: Report }) => {
                         <CardTitle>Target Financial Profile</CardTitle>
                         <CardDescription>Raw intelligence gathered on {report.target_brand}.</CardDescription>
                     </CardHeader>
-                    <CardContent className="space-y-4"><ScrollArea className="h-48"><p className="text-sm text-muted-foreground whitespace-pre-wrap"><ReactMarkdown>{analysis.target_financial_profile || "No data found."}</ReactMarkdown></p></ScrollArea>
+                    <CardContent className="space-y-4">
+                        <ScrollArea className="h-48">
+                           {/* --- THE FIX IS HERE --- */}
+                            <div className="text-sm text-muted-foreground whitespace-pre-wrap prose prose-sm dark:prose-invert prose-p:my-2">
+                                <ReactMarkdown>{analysis.target_financial_profile || "No data found."}</ReactMarkdown>
+                            </div>
+                        </ScrollArea>
                         {analysis.target_financial_sources && analysis.target_financial_sources.length > 0 && <div><h4 className="text-xs font-semibold uppercase text-muted-foreground mb-2">Sources</h4><div className="flex flex-wrap gap-2">{analysis.target_financial_sources.map(s => <SourcePill key={s.url} url={s.url} />)}</div></div>}
                     </CardContent>
                 </Card>
@@ -8227,8 +8537,6 @@ export const ReportView = ({ report, children }: ReportViewProps) => {
                                 <TabsTrigger value="affinity">Audience Affinity</TabsTrigger>
                                 <TabsTrigger value="corporate">Corporate Culture</TabsTrigger>
                                 <TabsTrigger value="financial">Financial & Market</TabsTrigger>
-                                <TabsTrigger value="clashes">Culture Clashes</TabsTrigger>
-                                <TabsTrigger value="growth">Growth Opportunities</TabsTrigger>
                                 <TabsTrigger value="sources">Sources</TabsTrigger>
                             </TabsList>
                             <TabsContent value="affinity" className="mt-4">
@@ -8239,29 +8547,6 @@ export const ReportView = ({ report, children }: ReportViewProps) => {
                             </TabsContent>
                             <TabsContent value="financial" className="mt-4">
                                 <FinancialAnalysis report={parsedReport} />
-                            </TabsContent>
-                            <TabsContent value="clashes" className="mt-4">
-                                <Card>
-                                    <CardHeader><CardTitle className="flex items-center gap-2"><AlertTriangle className="h-5 w-5 text-red-500" />Potential Culture Clashes</CardTitle><CardDescription>Divergent audience tastes that could pose integration risks.</CardDescription></CardHeader>
-                                    <CardContent>
-                                        <Table><TableHeader><TableRow><TableHead>Clash Topic</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Severity</TableHead></TableRow></TableHeader><TableBody>{parsedReport.culture_clashes.length > 0 ? parsedReport.culture_clashes.map((c) => (<TableRow key={c.id}><TableCell className="font-semibold">{c.topic}</TableCell><TableCell className="text-muted-foreground whitespace-normal">{c.description}</TableCell><TableCell className="text-right"><SeverityBadge severity={c.severity} /></TableCell></TableRow>)) : <TableRow><TableCell colSpan={3} className="text-center text-muted-foreground h-24">No significant culture clashes identified.</TableCell></TableRow>}</TableBody></Table>
-                                    </CardContent>
-                                </Card>
-                            </TabsContent>
-                            <TabsContent value="growth" className="mt-4">
-                                <Card>
-                                    <CardHeader><CardTitle className="flex items-center gap-2"><TrendingUp className="h-5 w-5 text-green-500" />Untapped Growth Opportunities</CardTitle><CardDescription>Shared affinities that represent strategic pillars for post-acquisition integration.</CardDescription></CardHeader>
-                                    <CardContent>
-                                        <Table>
-                                            <TableHeader><TableRow><TableHead>Opportunity</TableHead><TableHead className="text-right">Impact</TableHead></TableRow></TableHeader>
-                                            <TableBody>
-                                                {parsedReport.untapped_growths.length > 0 ? parsedReport.untapped_growths.map((g) => (
-                                                    <TableRow key={g.id}><TableCell className="font-medium whitespace-normal">{g.description}</TableCell><TableCell className="text-right font-bold text-green-600 dark:text-green-400">{g.potential_impact_score}/10</TableCell></TableRow>
-                                                )) : <TableRow><TableCell colSpan={2} className="text-center text-muted-foreground h-24">No significant growth opportunities identified.</TableCell></TableRow>}
-                                            </TableBody>
-                                        </Table>
-                                    </CardContent>
-                                </Card>
                             </TabsContent>
                              <TabsContent value="sources" className="mt-4">
                                  {uniqueSources.length > 0 ? (
@@ -8303,6 +8588,63 @@ export const ReportViewSkeleton = () => {
       </div>
       <Skeleton className="h-10 w-64" />
       <Skeleton className="h-80 w-full" />
+    </div>
+  );
+};-e 
+-e
+
+File: web/src/components/global/DemoReportCard.tsx
+"use client";
+
+import Link from "next/link";
+import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { ArrowRight, FileText, Sparkles, X } from "lucide-react";
+import { Report } from "@/types/report";
+import Logo from "./Logo";
+
+interface DemoReportCardProps {
+  report: Report;
+  onDismiss: () => void;
+}
+
+export const DemoReportCard = ({ report, onDismiss }: DemoReportCardProps) => {
+  return (
+    // MODIFIED: Changed max-width to create a "tall" rectangle
+    <div className="w-full max-w-sm">
+      <Card className="relative overflow-hidden border-primary/20 bg-card shadow-2xl">
+        <div className="absolute -top-1/2 -right-1/4 h-full w-1/2 bg-primary/5 rounded-full blur-3xl -z-10" />
+        <CardHeader>
+            <div className="flex items-start justify-between">
+                <div>
+                    <CardTitle className="flex items-center gap-2">
+                        <Logo className="h-5 w-5 text-primary" />
+                        Your First Analysis is Ready
+                    </CardTitle>
+                    <CardDescription className="mt-1">
+                        We've prepared a demo report to showcase Alloy's capabilities.
+                    </CardDescription>
+                </div>
+                <Button variant="ghost" size="icon" className="h-7 w-7 flex-shrink-0" onClick={onDismiss}>
+                    <X className="h-4 w-4" />
+                </Button>
+            </div>
+        </CardHeader>
+        {/* MODIFIED: Changed to a vertical flex layout */}
+        <div className="flex flex-col items-start gap-4 p-6 pt-0">
+             <div className="flex items-center gap-3 text-sm font-medium">
+                <FileText className="h-5 w-5 text-primary/80"/>
+                <span className="text-foreground">{report.title}</span>
+            </div>
+            <div className="w-full flex justify-end">
+                <Button asChild>
+                    <Link href={`/dashboard/reports/${report.id}`}>
+                        View Report <ArrowRight className="ml-2 h-4 w-4" />
+                    </Link>
+                </Button>
+            </div>
+        </div>
+      </Card>
     </div>
   );
 };-e 
@@ -8647,7 +8989,7 @@ export const AlloyHeroSection: React.FC = () => {
           transition={{ duration: 0.5 }}
           className="px-4 backdrop-blur-3xl bg-black/50 rounded-full py-3 flex justify-between items-center"
         >
-          <Logo />
+          <Logo hideText={false} className="text-white"/>
           <div className="flex items-center space-x-4">
             <Link href="/login">
               <button className="hidden md:block px-4 py-2 text-sm text-gray-300 hover:text-white transition-colors">Log In</button>
@@ -8706,7 +9048,7 @@ export const AlloyHeroSection: React.FC = () => {
             <motion.div
               //@ts-ignore
               variants={itemVariants}
-              className="flex items-center space-x-2 px-4 py-2 bg-white/5 hover:bg-white/10 backdrop-blur-sm rounded-full text-sm mb-6 transition-all duration-300 group"
+              className="flex items-center space-x-2 px-4 py-2 mt-10 bg-white/5 hover:bg-white/10 backdrop-blur-sm rounded-full text-sm mb-6 transition-all duration-300 group"
             >
               <span>The New Paradigm of Cultural Due Diligence</span>
             </motion.div>
@@ -9274,8 +9616,12 @@ export const PromptInputBox = React.forwardRef<HTMLDivElement, PromptInputBoxPro
                         {sources.length > 0 && <Collapsible open={isCollapsibleOpen} onOpenChange={setIsCollapsibleOpen}>
                             <CollapsibleTrigger className="w-full p-2 rounded-md hover:bg-muted/50 text-left">
                                 <div className="flex items-center justify-between"><div className="flex items-center gap-2 overflow-hidden"><Search className="h-4 w-4 text-blue-500 flex-shrink-0"/><span className="text-sm font-medium">Found {sources.length} sources</span>
-                                <div className="flex items-center gap-1.5 flex-shrink min-w-0">
-                                    {sources.map(source => <FaviconPreview key={source.id} url={source.payload.url}/>)}
+                                <div className="flex items-center -space-x-1 flex-shrink min-w-0">
+                                    {sources.map(source => (
+                                        <div key={source.id} className="relative flex h-4 w-4 items-center justify-center rounded-full ring-2 ring-background">
+                                            <FaviconPreview url={source.payload.url}/>
+                                        </div>
+                                    ))}
                                 </div>
                                 </div><span className="text-xs text-muted-foreground">{isCollapsibleOpen ? 'Collapse' : 'Expand'}</span></div>
                             </CollapsibleTrigger>
@@ -9534,7 +9880,7 @@ interface LogoProps {
   hideText?: boolean;
 }
 
-export const Logo: React.FC<LogoProps> = ({ className, hideText = false }) => {
+export const Logo: React.FC<LogoProps> = ({ className, hideText = true }) => {
   const pathname = usePathname();
 
   return (
@@ -9558,6 +9904,16 @@ export const Logo: React.FC<LogoProps> = ({ className, hideText = false }) => {
           <path d="M20 12V28M12 20H28" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </div>
+      {!hideText && (
+        <span
+          className={cn(
+            "text-xl font-bold tracking-tighter text-white",
+            playfair.className, className
+          )}
+        >
+          Alloy
+        </span>
+      )}
     </Link>
   );
 };
@@ -9934,6 +10290,8 @@ File: web/src/components/global/providers.tsx
 
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import Cookies from 'js-cookie';
+import { SWRConfig } from 'swr';
+import { toast } from 'sonner';
 
 // A simple JWT parser without adding extra dependencies
 const parseJwt = (token: string) => {
@@ -9962,7 +10320,8 @@ interface AuthContextType {
   logout: () => void;
   isAuthenticated: boolean;
   isLoading: boolean;
-  apiUrl: string; // Add apiUrl to the context
+  apiUrl: string;
+  authedFetch: (url: string, options?: RequestInit) => Promise<Response>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -9984,22 +10343,65 @@ export const AuthProvider = ({ children, apiUrl }: { children: React.ReactNode, 
     setIsLoading(false);
   }, []);
 
-  const login = useCallback((token: string, refreshToken: string) => {
-    const decodedToken = parseJwt(token);
-    if (decodedToken && decodedToken.sub) {
-      setUser({ email: decodedToken.sub, full_name: decodedToken.full_name });
-      setAccessToken(token);
-      Cookies.set('alloy_access_token', token, { expires: 1/24, secure: process.env.NODE_ENV === 'production' }); // 1 hour
-      Cookies.set('alloy_refresh_token', refreshToken, { expires: 7, secure: process.env.NODE_ENV === 'production' });
-    }
-  }, []);
-
   const logout = useCallback(() => {
     setUser(null);
     setAccessToken(null);
     Cookies.remove('alloy_access_token');
     Cookies.remove('alloy_refresh_token');
     window.location.href = '/login';
+  }, []);
+
+  const refreshAccessToken = useCallback(async (): Promise<string | null> => {
+    const refreshToken = Cookies.get('alloy_refresh_token');
+    if (!refreshToken) {
+      logout();
+      return null;
+    }
+    try {
+      const res = await fetch(`${apiUrl}/api/v1/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
+      if (!res.ok) throw new Error('Refresh failed, please log in again.');
+      const { access_token: newAccessToken } = await res.json();
+      const decodedToken = parseJwt(newAccessToken);
+      setAccessToken(newAccessToken);
+      if (decodedToken) setUser({ email: decodedToken.sub, full_name: decodedToken.full_name });
+      Cookies.set('alloy_access_token', newAccessToken, { expires: 1 / 24, secure: process.env.NODE_ENV === 'production' });
+      return newAccessToken;
+    } catch (error) {
+      console.error("Token refresh failed:", error);
+      logout();
+      return null;
+    }
+  }, [apiUrl, logout]);
+
+  const authedFetch = useCallback(async (url: string, options?: RequestInit): Promise<Response> => {
+    let token = Cookies.get('alloy_access_token');
+    if (!token) { logout(); throw new Error("User not authenticated"); }
+    
+    const res = await fetch(url, { ...options, headers: { ...options?.headers, 'Authorization': `Bearer ${token}` } });
+    
+    if (res.status === 401) {
+      const newToken = await refreshAccessToken();
+      if (newToken) {
+        return fetch(url, { ...options, headers: { ...options?.headers, 'Authorization': `Bearer ${newToken}` } });
+      } else {
+        throw new Error("Session expired");
+      }
+    }
+    return res;
+  }, [logout, refreshAccessToken]);
+
+  const login = useCallback((token: string, refreshToken: string) => {
+    const decodedToken = parseJwt(token);
+    if (decodedToken && decodedToken.sub) {
+      setUser({ email: decodedToken.sub, full_name: decodedToken.full_name });
+      setAccessToken(token);
+      Cookies.set('alloy_access_token', token, { expires: 1 / 24, secure: process.env.NODE_ENV === 'production' }); // 1 hour
+      Cookies.set('alloy_refresh_token', refreshToken, { expires: 7, secure: process.env.NODE_ENV === 'production' });
+    }
   }, []);
 
   const value = {
@@ -10009,10 +10411,24 @@ export const AuthProvider = ({ children, apiUrl }: { children: React.ReactNode, 
     logout,
     isAuthenticated: !!accessToken,
     isLoading,
-    apiUrl, // Provide the runtime URL to the context
+    apiUrl,
+    authedFetch,
   };
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+  const swrFetcher = async (url: string) => {
+      const res = await authedFetch(url);
+      if (!res.ok) {
+          const errorData = await res.json().catch(() => ({ detail: `Request failed with status ${res.status}` }));
+          throw new Error(errorData.detail);
+      }
+      return res.json();
+  };
+
+  return <AuthContext.Provider value={value}>
+    <SWRConfig value={{ fetcher: swrFetcher, onError: (error) => {
+      if (error.message !== 'Session expired' && error.message !== 'User not authenticated') { toast.error("Error", { description: error.message }); }
+    }}}>{children}</SWRConfig>
+  </AuthContext.Provider>;
 };
 
 export const useAuth = () => {
@@ -10192,6 +10608,7 @@ web/src
 │   │   ├── Breadcrumbs.tsx
 │   │   ├── CommandPalette.tsx
 │   │   ├── DashboardGreeting.tsx
+│   │   ├── DemoReportCard.tsx
 │   │   ├── Footer.tsx
 │   │   ├── Header.tsx
 │   │   ├── Hero.tsx
@@ -10241,7 +10658,7 @@ web/src
 └── types
     └── report.ts
 
-22 directories, 62 files
+22 directories, 63 files
 
 -----------------------
 

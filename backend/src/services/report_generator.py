@@ -51,21 +51,44 @@ def find_untapped_growth(acquirer_data: List[Dict], target_data: List[Dict]) -> 
     return opportunities
 
 
-async def generate_chat_response(query: str, report_context: str) -> AsyncGenerator[str, None]:
-    model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
-    prompt = f"""
-    You are an expert M&A analyst acting as a follow-up assistant. Your sole task is to answer the user's question based *only* on the provided report context. Do not use any outside knowledge or make up information. If the answer is not in the context, state that clearly. Provide concise, professional answers. Format your response using Markdown.
-    ---
-    **REPORT CONTEXT:**
-    {report_context}
-    ---
-    **USER'S QUESTION:**
-    {query}
-    ---
-    **YOUR ANSWER:**
+async def generate_chat_response(messages: List[Dict[str, Any]], report_context: str) -> AsyncGenerator[str, None]:
     """
+    Generates a conversational response from the LLM, maintaining chat history.
+    """
+    model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
+    
+    # Map our role names ('assistant') to Gemini's ('model')
+    gemini_history = []
+    for msg in messages:
+        role = "model" if msg["role"] in ["assistant", "bot"] else "user"
+        gemini_history.append({'role': role, 'parts': [msg['content']]})
+
+    # The system prompt and report context are prepended to the very first user message
+    # to give the model its instructions and the necessary data context for the entire conversation.
+    if gemini_history and gemini_history[0]['role'] == 'user':
+        first_user_content = gemini_history[0]['parts'][0]
+        system_and_report_context = f"""
+You are an expert M&A analyst acting as a follow-up assistant. Your sole task is to answer questions based *only* on the provided report context and the ongoing conversation. Do not use any outside knowledge or make up information. If the answer is not in the context, state that clearly. Provide concise, professional answers. Format your response using Markdown.
+---
+**REPORT CONTEXT:**
+{report_context}
+---
+**USER'S FIRST QUESTION:**
+{first_user_content}
+"""
+        gemini_history[0]['parts'] = [system_and_report_context]
+    
+    # The last message is the new query, the rest is history
+    history_for_chat = gemini_history[:-1]
+    new_query_content = gemini_history[-1]['parts'][0] if gemini_history else ""
+
+    if not new_query_content:
+        yield "I'm sorry, I didn't receive a question. Please try again."
+        return
+
     try:
-        response_stream = await model.generate_content_async(prompt, stream=True)
+        chat = model.start_chat(history=history_for_chat)
+        response_stream = await chat.send_message_async(new_query_content, stream=True)
         async for chunk in response_stream:
             yield chunk.text
     except Exception as e:

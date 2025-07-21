@@ -11,6 +11,7 @@ import { Bot, User, CornerDownLeft, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Report } from '@/types/report';
 import { toast } from 'sonner';
+import Logo from '../global/Logo';
 
 interface Message {
   id: string;
@@ -45,6 +46,11 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
     setInput('');
     setIsLoading(true);
 
+    const historyForApi = [...messages, userMessage].map(msg => ({
+        role: msg.sender === 'bot' ? 'assistant' : 'user', // Match backend/service expectation
+        content: msg.text
+    }));
+
     const botMessageId = `bot-${Date.now()}`;
     setMessages(prev => [...prev, { id: botMessageId, sender: 'bot', text: '...' }]);
 
@@ -65,7 +71,7 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${accessToken}`
         },
-        body: JSON.stringify({ query: input, context: reportContext })
+        body: JSON.stringify({ messages: historyForApi, context: reportContext })
       });
 
       if (!res.ok || !res.body) {
@@ -124,7 +130,7 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
                         message.sender === 'user' ? "justify-end" : "justify-start"
                     )}
                 >
-                    {message.sender === 'bot' && <div className="flex-shrink-0 bg-muted rounded-full p-2"><Bot className="h-4 w-4" /></div>}
+                    {message.sender === 'bot' && <div className="flex-shrink-0 bg-muted rounded-full p-2"><Logo className="h-4 w-4" /></div>}
                     <div className={cn(
                         "max-w-md rounded-lg px-4 py-2 text-sm prose prose-sm dark:prose-invert prose-p:my-2",
                         message.sender === 'bot' ? 'bg-muted rounded-bl-none' : 'bg-primary text-primary-foreground rounded-br-none'
