@@ -48,8 +48,4 @@ done
 
 echo "All images pushed successfully."
 
-docker build --platform=linux/amd64 \
-  --build-arg NEXT_PUBLIC_API_URL="https://alloy-backend-527185366316.europe-west1.run.app" \    
-  -t mrgreen1337/alloy-web:latest \
-  ./web \
-  --no-cache
+docker build --platform=linux/amd64 --build-arg NEXT_PUBLIC_API_URL="https://alloy-backend-527185366316.europe-west1.run.app" -t mrgreen1337/alloy-web:latest ./web --no-cache

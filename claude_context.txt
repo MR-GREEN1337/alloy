@@ -8638,7 +8638,7 @@ export const DemoReportCard = ({ report, onDismiss }: DemoReportCardProps) => {
             </div>
             <div className="w-full flex justify-end">
                 <Button asChild>
-                    <Link href={`/dashboard/reports/${report.id}`}>
+                    <Link href={`/dashboard/reports/${report.id}`} onClick={onDismiss}>
                         View Report <ArrowRight className="ml-2 h-4 w-4" />
                     </Link>
                 </Button>

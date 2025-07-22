@@ -9,19 +9,11 @@ import {
 } from "../ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { AlertTriangle, TrendingUp, Zap, Link as LinkIcon, Globe, Users, Target, Scale, Briefcase, BarChart3, CheckCircle } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Report, ClashSeverity, ReportAnalysis } from "@/types/report";
+import { Report, ClashSeverity } from "@/types/report";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
-import { AIAnalystChat } from "./AIAnalystChat";
+import {AIAnalystChat} from "./AIAnalystChat";
 import Image from "next/image";
 import Link from "next/link";
 import { Bar, BarChart, ResponsiveContainer, XAxis, YAxis, Tooltip, RadialBar, RadialBarChart, PolarAngleAxis } from 'recharts';
