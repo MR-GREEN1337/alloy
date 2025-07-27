@@ -318,7 +318,7 @@ const CorporateCultureAnalysis = ({ report }: { report: Report }) => {
                     <CardContent className="space-y-4">
                         <ScrollArea className="h-48">
                             {/* --- THE FIX IS HERE --- */}
-                            <div className="text-sm text-muted-foreground whitespace-pre-wrap prose prose-sm dark:prose-invert prose-p:my-2">
+                            <div className="prose prose-sm dark:prose-invert max-w-none text-muted-foreground">
                                 <ReactMarkdown>{analysis.acquirer_corporate_profile || "No data found."}</ReactMarkdown>
                             </div>
                         </ScrollArea>
@@ -333,7 +333,7 @@ const CorporateCultureAnalysis = ({ report }: { report: Report }) => {
                     <CardContent className="space-y-4">
                         <ScrollArea className="h-48">
                             {/* --- THE FIX IS HERE --- */}
-                             <div className="text-sm text-muted-foreground whitespace-pre-wrap prose prose-sm dark:prose-invert prose-p:my-2">
+                             <div className="prose prose-sm dark:prose-invert max-w-none text-muted-foreground">
                                 <ReactMarkdown>{analysis.target_corporate_profile || "No data found."}</ReactMarkdown>
                             </div>
                         </ScrollArea>
@@ -372,7 +372,7 @@ const FinancialAnalysis = ({ report }: { report: Report }) => {
                     <CardContent className="space-y-4">
                         <ScrollArea className="h-48">
                             {/* --- THE FIX IS HERE --- */}
-                             <div className="text-sm text-muted-foreground whitespace-pre-wrap prose prose-sm dark:prose-invert prose-p:my-2">
+                             <div className="prose prose-sm dark:prose-invert max-w-none text-muted-foreground">
                                 <ReactMarkdown>{analysis.acquirer_financial_profile || "No data found."}</ReactMarkdown>
                             </div>
                         </ScrollArea>

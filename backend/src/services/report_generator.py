@@ -51,46 +51,64 @@ def find_untapped_growth(acquirer_data: List[Dict], target_data: List[Dict]) -> 
     return opportunities
 
 
-async def generate_chat_response(messages: List[Dict[str, Any]], report_context: str) -> AsyncGenerator[str, None]:
+async def generate_chat_response(
+    messages: List[Dict[str, Any]], 
+    report_context: str, 
+    use_grounding: bool
+) -> AsyncGenerator[Dict[str, Any], None]:
     """
-    Generates a conversational response from the LLM, maintaining chat history.
+    Generates a conversational response from the LLM, optionally using web search to ground the answer.
+    Yields structured JSON events for sources and text chunks.
     """
     model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
-    
-    # Map our role names ('assistant') to Gemini's ('model')
+
+    # 1. Separate history from the new query
     gemini_history = []
-    for msg in messages:
+    for msg in messages[:-1]:
         role = "model" if msg["role"] in ["assistant", "bot"] else "user"
         gemini_history.append({'role': role, 'parts': [msg['content']]})
 
-    # The system prompt and report context are prepended to the very first user message
-    # to give the model its instructions and the necessary data context for the entire conversation.
-    if gemini_history and gemini_history[0]['role'] == 'user':
-        first_user_content = gemini_history[0]['parts'][0]
-        system_and_report_context = f"""
-You are an expert M&A analyst acting as a follow-up assistant. Your sole task is to answer questions based *only* on the provided report context and the ongoing conversation. Do not use any outside knowledge or make up information. If the answer is not in the context, state that clearly. Provide concise, professional answers. Format your response using Markdown.
----
-**REPORT CONTEXT:**
-{report_context}
----
-**USER'S FIRST QUESTION:**
-{first_user_content}
-"""
-        gemini_history[0]['parts'] = [system_and_report_context]
-    
-    # The last message is the new query, the rest is history
-    history_for_chat = gemini_history[:-1]
-    new_query_content = gemini_history[-1]['parts'][0] if gemini_history else ""
-
-    if not new_query_content:
-        yield "I'm sorry, I didn't receive a question. Please try again."
+    # 2. Prepare the latest user query and handle grounding
+    last_user_message = messages[-1]['content'] if messages else ""
+    if not last_user_message:
         return
 
+    final_query_prompt = last_user_message
+    if use_grounding:
+        logger.info(f"Chat grounding enabled. Searching for: '{last_user_message}'")
+        search_results = await web_search(last_user_message)
+        if search_results and search_results['sources']:
+            for source in search_results['sources']:
+                yield {"type": "source", "payload": source}
+            
+            final_query_prompt = f"""
+Based on the following live web search results, answer my question.
+You should also use the initial report context and our conversation history if needed for full context.
+
+**WEB SEARCH RESULTS:**
+---
+{search_results['context_str']}
+---
+
+**MY QUESTION:** {last_user_message}
+"""
+    
+    # 3. Add the main system prompt to the first message in a conversation
+    if not gemini_history:
+        final_query_prompt = f"""
+You are an expert M&A analyst acting as a follow-up assistant. Your sole task is to answer questions based *only* on the provided report context, conversation history, and any live web search results provided for the current query. Do not use any outside knowledge or make up information. If the answer is not in the provided materials, state that clearly. Provide concise, professional answers. Format your response using Markdown.
+---
+**INITIAL REPORT CONTEXT:**
+{report_context}
+---
+{final_query_prompt}
+"""
+    
     try:
-        chat = model.start_chat(history=history_for_chat)
-        response_stream = await chat.send_message_async(new_query_content, stream=True)
+        chat = model.start_chat(history=gemini_history)
+        response_stream = await chat.send_message_async(final_query_prompt, stream=True)
         async for chunk in response_stream:
-            yield chunk.text
+            yield {"type": "chunk", "payload": chunk.text}
     except Exception as e:
         logger.error(f"Gemini chat stream failed: {e}")
-        yield "There was an error processing your request. Please try again."
+        yield {"type": "error", "payload": "There was an error processing your request. Please try again."}

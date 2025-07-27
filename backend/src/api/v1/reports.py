@@ -43,6 +43,7 @@ class DraftReportResponse(SQLModel):
 class ReportChatPayload(SQLModel):
     messages: List[Dict[str, str]]
     context: str
+    use_grounding: bool = False
 
 class FileUploadResponse(SQLModel):
     filename: str
@@ -377,10 +378,14 @@ async def delete_report(report_id: uuid.UUID, session: AsyncSession = Depends(ge
 async def chat_with_report(report_id: uuid.UUID, payload: ReportChatPayload, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     report = await session.get(models.Report, report_id)
     if not report or report.user_id != current_user.id: raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found.")
+    
     async def stream_response():
         try:
-            async for chunk in generate_chat_response(payload.messages, payload.context): yield chunk
+            async for event in generate_chat_response(payload.messages, payload.context, payload.use_grounding):
+                yield f"data: {json.dumps(event)}\n\n"
         except Exception as e:
             logger.error(f"Error during chat stream for report {report_id}: {e}")
-            yield "Sorry, I encountered an error while processing your request."
+            error_event = {"type": "error", "payload": "Sorry, I encountered an error while processing your request."}
+            yield f"data: {json.dumps(error_event)}\n\n"
+
     return StreamingResponse(stream_response(), media_type="text/event-stream")

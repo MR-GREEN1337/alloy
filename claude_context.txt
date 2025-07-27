@@ -1123,6 +1123,7 @@ class DraftReportResponse(SQLModel):
 class ReportChatPayload(SQLModel):
     messages: List[Dict[str, str]]
     context: str
+    use_grounding: bool = False
 
 class FileUploadResponse(SQLModel):
     filename: str
@@ -1457,12 +1458,16 @@ async def delete_report(report_id: uuid.UUID, session: AsyncSession = Depends(ge
 async def chat_with_report(report_id: uuid.UUID, payload: ReportChatPayload, session: AsyncSession = Depends(get_session), current_user: models.User = Depends(get_current_user)):
     report = await session.get(models.Report, report_id)
     if not report or report.user_id != current_user.id: raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Report not found.")
+    
     async def stream_response():
         try:
-            async for chunk in generate_chat_response(payload.messages, payload.context): yield chunk
+            async for event in generate_chat_response(payload.messages, payload.context, payload.use_grounding):
+                yield f"data: {json.dumps(event)}\n\n"
         except Exception as e:
             logger.error(f"Error during chat stream for report {report_id}: {e}")
-            yield "Sorry, I encountered an error while processing your request."
+            error_event = {"type": "error", "payload": "Sorry, I encountered an error while processing your request."}
+            yield f"data: {json.dumps(error_event)}\n\n"
+
     return StreamingResponse(stream_response(), media_type="text/event-stream")-e 
 -e
 
@@ -2346,49 +2351,67 @@ def find_untapped_growth(acquirer_data: List[Dict], target_data: List[Dict]) -> 
     return opportunities
 
 
-async def generate_chat_response(messages: List[Dict[str, Any]], report_context: str) -> AsyncGenerator[str, None]:
+async def generate_chat_response(
+    messages: List[Dict[str, Any]], 
+    report_context: str, 
+    use_grounding: bool
+) -> AsyncGenerator[Dict[str, Any], None]:
     """
-    Generates a conversational response from the LLM, maintaining chat history.
+    Generates a conversational response from the LLM, optionally using web search to ground the answer.
+    Yields structured JSON events for sources and text chunks.
     """
     model = genai.GenerativeModel(settings.GEMINI_MODEL_NAME)
-    
-    # Map our role names ('assistant') to Gemini's ('model')
+
+    # 1. Separate history from the new query
     gemini_history = []
-    for msg in messages:
+    for msg in messages[:-1]:
         role = "model" if msg["role"] in ["assistant", "bot"] else "user"
         gemini_history.append({'role': role, 'parts': [msg['content']]})
 
-    # The system prompt and report context are prepended to the very first user message
-    # to give the model its instructions and the necessary data context for the entire conversation.
-    if gemini_history and gemini_history[0]['role'] == 'user':
-        first_user_content = gemini_history[0]['parts'][0]
-        system_and_report_context = f"""
-You are an expert M&A analyst acting as a follow-up assistant. Your sole task is to answer questions based *only* on the provided report context and the ongoing conversation. Do not use any outside knowledge or make up information. If the answer is not in the context, state that clearly. Provide concise, professional answers. Format your response using Markdown.
----
-**REPORT CONTEXT:**
-{report_context}
----
-**USER'S FIRST QUESTION:**
-{first_user_content}
-"""
-        gemini_history[0]['parts'] = [system_and_report_context]
-    
-    # The last message is the new query, the rest is history
-    history_for_chat = gemini_history[:-1]
-    new_query_content = gemini_history[-1]['parts'][0] if gemini_history else ""
-
-    if not new_query_content:
-        yield "I'm sorry, I didn't receive a question. Please try again."
+    # 2. Prepare the latest user query and handle grounding
+    last_user_message = messages[-1]['content'] if messages else ""
+    if not last_user_message:
         return
 
+    final_query_prompt = last_user_message
+    if use_grounding:
+        logger.info(f"Chat grounding enabled. Searching for: '{last_user_message}'")
+        search_results = await web_search(last_user_message)
+        if search_results and search_results['sources']:
+            for source in search_results['sources']:
+                yield {"type": "source", "payload": source}
+            
+            final_query_prompt = f"""
+Based on the following live web search results, answer my question.
+You should also use the initial report context and our conversation history if needed for full context.
+
+**WEB SEARCH RESULTS:**
+---
+{search_results['context_str']}
+---
+
+**MY QUESTION:** {last_user_message}
+"""
+    
+    # 3. Add the main system prompt to the first message in a conversation
+    if not gemini_history:
+        final_query_prompt = f"""
+You are an expert M&A analyst acting as a follow-up assistant. Your sole task is to answer questions based *only* on the provided report context, conversation history, and any live web search results provided for the current query. Do not use any outside knowledge or make up information. If the answer is not in the provided materials, state that clearly. Provide concise, professional answers. Format your response using Markdown.
+---
+**INITIAL REPORT CONTEXT:**
+{report_context}
+---
+{final_query_prompt}
+"""
+    
     try:
-        chat = model.start_chat(history=history_for_chat)
-        response_stream = await chat.send_message_async(new_query_content, stream=True)
+        chat = model.start_chat(history=gemini_history)
+        response_stream = await chat.send_message_async(final_query_prompt, stream=True)
         async for chunk in response_stream:
-            yield chunk.text
+            yield {"type": "chunk", "payload": chunk.text}
     except Exception as e:
         logger.error(f"Gemini chat stream failed: {e}")
-        yield "There was an error processing your request. Please try again."-e 
+        yield {"type": "error", "payload": "There was an error processing your request. Please try again."}-e 
 -e
 
 File: backend/src/services/search.py
@@ -7883,7 +7906,6 @@ export const AuthVisual = () => {
 -e
 
 File: web/src/components/report/AIAnalystChat.tsx
-// File: web/src/components/report/AIAnalystChat.tsx
 "use client";
 
 import React, { useState, useRef, useEffect, memo, FC } from 'react';
@@ -7893,25 +7915,44 @@ import { Textarea } from '@/components/ui/textarea';
 import ReactMarkdown from "react-markdown";
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Bot, User, CornerDownLeft, Loader2, XCircle, Sparkles } from 'lucide-react';
+import { Bot, User, CornerDownLeft, Loader2, XCircle, Sparkles, Globe, Link as LinkIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Report } from '@/types/report';
 import { toast } from 'sonner';
 import Logo from '../global/Logo';
 import { Avatar, AvatarFallback } from '../ui/avatar';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/tooltip';
+import Image from 'next/image';
+import Link from 'next/link';
+
 
 // --- Types ---
 interface Message {
   id: string;
-  sender: 'user' | 'bot' | 'error';
+  sender: 'user' | 'bot' | 'error' | 'system';
   text: string;
   isStreaming?: boolean;
+  sources?: Array<{ title: string; url: string }>;
 }
 
 interface AIAnalystChatProps {
   report: Report;
 }
 
+// --- Helper Components ---
+const SourcePill: FC<{ source: { title?: string, url: string } }> = ({ source }) => {
+    try {
+        const domain = new URL(source.url).hostname?.replace('www.', '');
+        return (
+            <Link href={source.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 rounded-full border bg-background/50 px-2 py-0.5 text-xs text-secondary-foreground transition-colors hover:bg-secondary">
+                <Image src={`/api/v1/utils/favicon?url=${encodeURIComponent(source.url)}`} alt={`${domain} favicon`} width={12} height={12} className="rounded-full" unoptimized/>
+                <span className="truncate">{source.title || domain}</span>
+            </Link>
+        )
+    } catch (error) {
+        return <Link href={source.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 rounded-full border bg-background/50 px-2 py-0.5 text-xs text-secondary-foreground transition-colors hover:bg-secondary"><LinkIcon className="h-3 w-3" /><span>Source</span></Link>
+    }
+}
 
 // --- Sub-components for better organization ---
 
@@ -7925,6 +7966,17 @@ const AssistantAvatar: FC<{ isError?: boolean }> = ({ isError }) => (
 
 const MessageBubble: FC<{ message: Message }> = memo(({ message }) => {
   const isUser = message.sender === 'user';
+  if (message.sender === 'system') {
+      return (
+          <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground py-2">
+            <Globe className="h-4 w-4" />
+            <p>Grounded with {message.sources?.length} web source(s):</p>
+            <div className="flex flex-wrap gap-1">
+                {message.sources?.map(s => <SourcePill key={s.url} source={s} />)}
+            </div>
+          </div>
+      )
+  }
   return (
     <div className={cn("flex items-start gap-3 w-full", isUser && "justify-end")}>
       {!isUser && <AssistantAvatar isError={message.sender === 'error'} />}
@@ -8017,6 +8069,7 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [useGrounding, setUseGrounding] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -8033,6 +8086,9 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
     }));
 
     const botMessageId = `bot-${Date.now()}`;
+    const sourceList: Array<{ title: string; url: string }> = [];
+
+    // Add a placeholder bot message to start streaming into
     setMessages(prev => [...prev, { id: botMessageId, sender: 'bot', text: '', isStreaming: true }]);
 
     try {
@@ -8040,27 +8096,61 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
 
       const res = await fetch(`/api/v1/reports/${report.id}/chat`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${accessToken}`
-        },
-        body: JSON.stringify({ messages: historyForApi, context: reportContext })
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
+        body: JSON.stringify({ messages: historyForApi, context: reportContext, use_grounding: useGrounding })
       });
 
       if (!res.ok || !res.body) throw new Error('Failed to get chat response from server.');
       
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
-      let done = false;
+      let accumulatedData = "";
 
-      while (!done) {
-        const { value, done: readerDone } = await reader.read();
-        done = readerDone;
-        const chunk = decoder.decode(value, { stream: true });
-        setMessages(prev => prev.map(msg => 
-            msg.id === botMessageId ? { ...msg, text: msg.text + chunk, isStreaming: !done } : msg
-        ));
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        accumulatedData += decoder.decode(value, { stream: true });
+        const lines = accumulatedData.split('\n\n');
+        accumulatedData = lines.pop() || "";
+
+        for (const line of lines) {
+            if (line.startsWith('data: ')) {
+                const data = JSON.parse(line.substring(6));
+
+                if (data.type === 'source' && data.payload) {
+                    sourceList.push(data.payload);
+                } else if (data.type === 'chunk' && data.payload) {
+                    setMessages(prev => prev.map(msg => 
+                        msg.id === botMessageId ? { ...msg, text: msg.text + data.payload } : msg
+                    ));
+                } else if (data.type === 'error' && data.payload) {
+                     setMessages(prev => prev.map(msg => 
+                        msg.id === botMessageId ? { ...msg, text: data.payload, sender: 'error' } : msg
+                    ));
+                }
+            }
+        }
       }
+      
+      // After streaming is done, if sources were found, add a system message for them
+      if(sourceList.length > 0) {
+        setMessages(prev => {
+            const botMsgIndex = prev.findIndex(m => m.id === botMessageId);
+            if(botMsgIndex > -1) {
+                const newMessages = [...prev];
+                newMessages.splice(botMsgIndex, 0, {
+                    id: `system-${Date.now()}`,
+                    sender: 'system',
+                    text: '',
+                    sources: sourceList,
+                });
+                return newMessages;
+            }
+            return prev;
+        });
+      }
+
 
     } catch (error: any) {
         const errorMessage = "I'm sorry, I encountered an error. Please try again.";
@@ -8070,6 +8160,10 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
         ));
     } finally {
         setIsLoading(false);
+         // Mark the main bot message as complete
+        setMessages(prev => prev.map(msg => 
+            msg.id === botMessageId ? { ...msg, isStreaming: false } : msg
+        ));
     }
   };
 
@@ -8089,13 +8183,38 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
             onChange={e => setInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { handleSubmit(e); } }}
             placeholder="Ask a follow-up..."
-            className="pr-12 min-h-[40px] max-h-48"
+            className="pr-20 min-h-[40px] max-h-48"
             disabled={isLoading}
             rows={1}
           />
-          <Button type="submit" size="icon" className="absolute right-2 bottom-2 h-8 w-8" disabled={isLoading || !input.trim()}>
-            {isLoading ? <Loader2 className="h-4 w-4 animate-spin"/> : <CornerDownLeft className="h-4 w-4" />}
-          </Button>
+          <div className="absolute right-2 bottom-2 flex items-center gap-1">
+            <TooltipProvider delayDuration={150}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button" // Prevent form submission
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setUseGrounding((prev) => !prev)}
+                    className={cn(
+                      "h-8 w-8 text-muted-foreground",
+                      useGrounding && "bg-primary/10 text-primary" // On-brand blue/primary color
+                    )}
+                    disabled={isLoading}
+                  >
+                    <Globe className="h-4 w-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top">
+                  <p>{useGrounding ? "Web search enabled" : "Enable web search"}</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+
+            <Button type="submit" size="icon" className="h-8 w-8" disabled={isLoading || !input.trim()}>
+              {isLoading ? <Loader2 className="h-4 w-4 animate-spin"/> : <CornerDownLeft className="h-4 w-4" />}
+            </Button>
+          </div>
         </form>
       </div>
     </div>
@@ -8424,7 +8543,7 @@ const CorporateCultureAnalysis = ({ report }: { report: Report }) => {
                     <CardContent className="space-y-4">
                         <ScrollArea className="h-48">
                             {/* --- THE FIX IS HERE --- */}
-                            <div className="text-sm text-muted-foreground whitespace-pre-wrap prose prose-sm dark:prose-invert prose-p:my-2">
+                            <div className="prose prose-sm dark:prose-invert max-w-none text-muted-foreground">
                                 <ReactMarkdown>{analysis.acquirer_corporate_profile || "No data found."}</ReactMarkdown>
                             </div>
                         </ScrollArea>
@@ -8439,7 +8558,7 @@ const CorporateCultureAnalysis = ({ report }: { report: Report }) => {
                     <CardContent className="space-y-4">
                         <ScrollArea className="h-48">
                             {/* --- THE FIX IS HERE --- */}
-                             <div className="text-sm text-muted-foreground whitespace-pre-wrap prose prose-sm dark:prose-invert prose-p:my-2">
+                             <div className="prose prose-sm dark:prose-invert max-w-none text-muted-foreground">
                                 <ReactMarkdown>{analysis.target_corporate_profile || "No data found."}</ReactMarkdown>
                             </div>
                         </ScrollArea>
@@ -8478,7 +8597,7 @@ const FinancialAnalysis = ({ report }: { report: Report }) => {
                     <CardContent className="space-y-4">
                         <ScrollArea className="h-48">
                             {/* --- THE FIX IS HERE --- */}
-                             <div className="text-sm text-muted-foreground whitespace-pre-wrap prose prose-sm dark:prose-invert prose-p:my-2">
+                             <div className="prose prose-sm dark:prose-invert max-w-none text-muted-foreground">
                                 <ReactMarkdown>{analysis.acquirer_financial_profile || "No data found."}</ReactMarkdown>
                             </div>
                         </ScrollArea>

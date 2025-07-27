@@ -1,4 +1,3 @@
-// File: web/src/components/report/AIAnalystChat.tsx
 "use client";
 
 import React, { useState, useRef, useEffect, memo, FC } from 'react';
@@ -8,25 +7,44 @@ import { Textarea } from '@/components/ui/textarea';
 import ReactMarkdown from "react-markdown";
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Bot, User, CornerDownLeft, Loader2, XCircle, Sparkles } from 'lucide-react';
+import { Bot, User, CornerDownLeft, Loader2, XCircle, Sparkles, Globe, Link as LinkIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Report } from '@/types/report';
 import { toast } from 'sonner';
 import Logo from '../global/Logo';
 import { Avatar, AvatarFallback } from '../ui/avatar';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/tooltip';
+import Image from 'next/image';
+import Link from 'next/link';
+
 
 // --- Types ---
 interface Message {
   id: string;
-  sender: 'user' | 'bot' | 'error';
+  sender: 'user' | 'bot' | 'error' | 'system';
   text: string;
   isStreaming?: boolean;
+  sources?: Array<{ title: string; url: string }>;
 }
 
 interface AIAnalystChatProps {
   report: Report;
 }
 
+// --- Helper Components ---
+const SourcePill: FC<{ source: { title?: string, url: string } }> = ({ source }) => {
+    try {
+        const domain = new URL(source.url).hostname?.replace('www.', '');
+        return (
+            <Link href={source.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 rounded-full border bg-background/50 px-2 py-0.5 text-xs text-secondary-foreground transition-colors hover:bg-secondary">
+                <Image src={`/api/v1/utils/favicon?url=${encodeURIComponent(source.url)}`} alt={`${domain} favicon`} width={12} height={12} className="rounded-full" unoptimized/>
+                <span className="truncate">{source.title || domain}</span>
+            </Link>
+        )
+    } catch (error) {
+        return <Link href={source.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 rounded-full border bg-background/50 px-2 py-0.5 text-xs text-secondary-foreground transition-colors hover:bg-secondary"><LinkIcon className="h-3 w-3" /><span>Source</span></Link>
+    }
+}
 
 // --- Sub-components for better organization ---
 
@@ -40,6 +58,17 @@ const AssistantAvatar: FC<{ isError?: boolean }> = ({ isError }) => (
 
 const MessageBubble: FC<{ message: Message }> = memo(({ message }) => {
   const isUser = message.sender === 'user';
+  if (message.sender === 'system') {
+      return (
+          <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground py-2">
+            <Globe className="h-4 w-4" />
+            <p>Grounded with {message.sources?.length} web source(s):</p>
+            <div className="flex flex-wrap gap-1">
+                {message.sources?.map(s => <SourcePill key={s.url} source={s} />)}
+            </div>
+          </div>
+      )
+  }
   return (
     <div className={cn("flex items-start gap-3 w-full", isUser && "justify-end")}>
       {!isUser && <AssistantAvatar isError={message.sender === 'error'} />}
@@ -132,6 +161,7 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [useGrounding, setUseGrounding] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -148,6 +178,9 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
     }));
 
     const botMessageId = `bot-${Date.now()}`;
+    const sourceList: Array<{ title: string; url: string }> = [];
+
+    // Add a placeholder bot message to start streaming into
     setMessages(prev => [...prev, { id: botMessageId, sender: 'bot', text: '', isStreaming: true }]);
 
     try {
@@ -155,27 +188,61 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
 
       const res = await fetch(`/api/v1/reports/${report.id}/chat`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${accessToken}`
-        },
-        body: JSON.stringify({ messages: historyForApi, context: reportContext })
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
+        body: JSON.stringify({ messages: historyForApi, context: reportContext, use_grounding: useGrounding })
       });
 
       if (!res.ok || !res.body) throw new Error('Failed to get chat response from server.');
       
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
-      let done = false;
+      let accumulatedData = "";
 
-      while (!done) {
-        const { value, done: readerDone } = await reader.read();
-        done = readerDone;
-        const chunk = decoder.decode(value, { stream: true });
-        setMessages(prev => prev.map(msg => 
-            msg.id === botMessageId ? { ...msg, text: msg.text + chunk, isStreaming: !done } : msg
-        ));
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        accumulatedData += decoder.decode(value, { stream: true });
+        const lines = accumulatedData.split('\n\n');
+        accumulatedData = lines.pop() || "";
+
+        for (const line of lines) {
+            if (line.startsWith('data: ')) {
+                const data = JSON.parse(line.substring(6));
+
+                if (data.type === 'source' && data.payload) {
+                    sourceList.push(data.payload);
+                } else if (data.type === 'chunk' && data.payload) {
+                    setMessages(prev => prev.map(msg => 
+                        msg.id === botMessageId ? { ...msg, text: msg.text + data.payload } : msg
+                    ));
+                } else if (data.type === 'error' && data.payload) {
+                     setMessages(prev => prev.map(msg => 
+                        msg.id === botMessageId ? { ...msg, text: data.payload, sender: 'error' } : msg
+                    ));
+                }
+            }
+        }
       }
+      
+      // After streaming is done, if sources were found, add a system message for them
+      if(sourceList.length > 0) {
+        setMessages(prev => {
+            const botMsgIndex = prev.findIndex(m => m.id === botMessageId);
+            if(botMsgIndex > -1) {
+                const newMessages = [...prev];
+                newMessages.splice(botMsgIndex, 0, {
+                    id: `system-${Date.now()}`,
+                    sender: 'system',
+                    text: '',
+                    sources: sourceList,
+                });
+                return newMessages;
+            }
+            return prev;
+        });
+      }
+
 
     } catch (error: any) {
         const errorMessage = "I'm sorry, I encountered an error. Please try again.";
@@ -185,6 +252,10 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
         ));
     } finally {
         setIsLoading(false);
+         // Mark the main bot message as complete
+        setMessages(prev => prev.map(msg => 
+            msg.id === botMessageId ? { ...msg, isStreaming: false } : msg
+        ));
     }
   };
 
@@ -204,13 +275,38 @@ export const AIAnalystChat = ({ report }: AIAnalystChatProps) => {
             onChange={e => setInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { handleSubmit(e); } }}
             placeholder="Ask a follow-up..."
-            className="pr-12 min-h-[40px] max-h-48"
+            className="pr-20 min-h-[40px] max-h-48"
             disabled={isLoading}
             rows={1}
           />
-          <Button type="submit" size="icon" className="absolute right-2 bottom-2 h-8 w-8" disabled={isLoading || !input.trim()}>
-            {isLoading ? <Loader2 className="h-4 w-4 animate-spin"/> : <CornerDownLeft className="h-4 w-4" />}
-          </Button>
+          <div className="absolute right-2 bottom-2 flex items-center gap-1">
+            <TooltipProvider delayDuration={150}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button" // Prevent form submission
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setUseGrounding((prev) => !prev)}
+                    className={cn(
+                      "h-8 w-8 text-muted-foreground",
+                      useGrounding && "bg-primary/10 text-primary" // On-brand blue/primary color
+                    )}
+                    disabled={isLoading}
+                  >
+                    <Globe className="h-4 w-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top">
+                  <p>{useGrounding ? "Web search enabled" : "Enable web search"}</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+
+            <Button type="submit" size="icon" className="h-8 w-8" disabled={isLoading || !input.trim()}>
+              {isLoading ? <Loader2 className="h-4 w-4 animate-spin"/> : <CornerDownLeft className="h-4 w-4" />}
+            </Button>
+          </div>
         </form>
       </div>
     </div>
